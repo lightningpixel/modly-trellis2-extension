@@ -57,8 +57,8 @@ class Trellis2Generator(BaseGenerator):
         if not self.is_downloaded():
             self._auto_download()
 
+        self._setup_env()    # must run before vendor imports so SPARSE_CONV_BACKEND is set
         self._setup_vendor()
-        self._setup_env()
 
         from trellis2.pipelines import Trellis2ImageTo3DPipeline
 
