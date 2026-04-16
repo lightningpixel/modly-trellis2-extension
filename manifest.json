@@ -5,12 +5,117 @@
   "description": "High-fidelity image-to-3D with PBR textures via O-Voxel structured latents. Generates geometry + full PBR material. Requires ~24GB VRAM.",
   "version": "1.0.0",
   "author": "Lightning Pixel",
+  "type": "model",
   "generator_class": "Trellis2Generator",
   "tags": [
     "image-to-3d",
     "high-quality",
     "pbr",
     "diffusion"
+  ],
+  "nodes": [
+    {
+      "id": "trellis-2",
+      "name": "TRELLIS.2-4B",
+      "input": "image",
+      "output": "mesh",
+      "hf_repo": "microsoft/TRELLIS.2-4B",
+      "download_check": "pipeline.json",
+      "description": "4B-parameter O-Voxel diffusion model for high-fidelity image-to-3D with PBR textures (~24GB VRAM)",
+      "params_schema": [
+        {
+          "id": "pipeline_type",
+          "label": "Resolution",
+          "type": "select",
+          "options": [
+            {
+              "value": "512",
+              "label": "512³  (~3 s)"
+            },
+            {
+              "value": "1024",
+              "label": "1024³  (~17 s)"
+            },
+            {
+              "value": "1024_cascade",
+              "label": "1024³ Cascade (~17 s)"
+            },
+            {
+              "value": "1536_cascade",
+              "label": "1536³ Cascade (~60 s)"
+            }
+          ],
+          "default": "1024_cascade",
+          "tooltip": "Voxel resolution. Higher = more geometry detail but much slower and more VRAM."
+        },
+        {
+          "id": "sparse_steps",
+          "label": "Sparse Structure Steps",
+          "type": "int",
+          "default": 12,
+          "min": 1,
+          "max": 50,
+          "tooltip": "Diffusion steps for the sparse structure stage. More steps = better structure."
+        },
+        {
+          "id": "shape_steps",
+          "label": "Shape SLAT Steps",
+          "type": "int",
+          "default": 12,
+          "min": 1,
+          "max": 50,
+          "tooltip": "Diffusion steps for the shape latent stage. More steps = finer geometry."
+        },
+        {
+          "id": "tex_steps",
+          "label": "Texture SLAT Steps",
+          "type": "int",
+          "default": 12,
+          "min": 1,
+          "max": 50,
+          "tooltip": "Diffusion steps for the texture latent stage. More steps = sharper textures."
+        },
+        {
+          "id": "faces",
+          "label": "Max Faces",
+          "type": "int",
+          "default": -1,
+          "min": -1,
+          "max": 16777216,
+          "tooltip": "Target polygon count after simplification. -1 uses 1,000,000."
+        },
+        {
+          "id": "texture_size",
+          "label": "Texture Size",
+          "type": "select",
+          "options": [
+            {
+              "value": 2048,
+              "label": "2048"
+            },
+            {
+              "value": 4096,
+              "label": "4096"
+            },
+            {
+              "value": 8192,
+              "label": "8192"
+            }
+          ],
+          "default": 4096,
+          "tooltip": "Resolution of the baked PBR texture atlas (base color, roughness, metallic)."
+        },
+        {
+          "id": "seed",
+          "label": "Seed",
+          "type": "int",
+          "default": 42,
+          "min": 0,
+          "max": 2147483647,
+          "tooltip": "Seed for reproducibility. Click shuffle for a random seed."
+        }
+      ]
+    }
   ],
   "models": [
     {
