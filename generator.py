@@ -118,11 +118,57 @@ IMAGE_TO_MESH_PARAMS_SCHEMA = [
 ]
 
 
+TEXTURE_MESH_PARAMS_SCHEMA = [
+    {
+        "id":      "pipeline_type",
+        "label":   "Texture Resolution",
+        "type":    "select",
+        "options": [
+            {"value": "512",  "label": "512³"},
+            {"value": "1024", "label": "1024³"},
+        ],
+        "default": "1024",
+        "tooltip": "Internal voxel/texturing resolution used by the TRELLIS.2 texturing pipeline. 1024 gives better fidelity but costs more VRAM and time.",
+    },
+    {
+        "id":      "tex_steps",
+        "label":   "Texture SLAT Steps",
+        "type":    "int",
+        "default": 12,
+        "min":     1,
+        "max":     50,
+        "tooltip": "Diffusion steps for the texture latent stage. More steps = sharper textures.",
+    },
+    {
+        "id":      "texture_size",
+        "label":   "Texture Size",
+        "type":    "select",
+        "options": [
+            {"value": 2048, "label": "2048"},
+            {"value": 4096, "label": "4096"},
+            {"value": 8192, "label": "8192"},
+        ],
+        "default": 4096,
+        "tooltip": "Resolution of the exported texture atlas. Higher values improve detail but increase memory and export time.",
+    },
+    {
+        "id":      "seed",
+        "label":   "Seed",
+        "type":    "int",
+        "default": 42,
+        "min":     0,
+        "max":     2147483647,
+        "tooltip": "Seed for reproducibility. Click shuffle for a random seed.",
+    },
+]
+
+
 @dataclass(frozen=True)
 class CapabilityConfig:
     node_id: str
     capability_id: str
     display_name: str
+    config_file: str
     download_check: str
     input_kind: str
     output_kind: str
@@ -134,10 +180,21 @@ CAPABILITIES: dict[str, CapabilityConfig] = {
         node_id="generate",
         capability_id="image-to-mesh",
         display_name="Image to Mesh",
+        config_file="pipeline.json",
         download_check="pipeline.json",
         input_kind="image",
         output_kind="mesh",
         params_schema=IMAGE_TO_MESH_PARAMS_SCHEMA,
+    ),
+    "texture-mesh": CapabilityConfig(
+        node_id="texture-mesh",
+        capability_id="texture-mesh",
+        display_name="Texture Mesh",
+        config_file="texturing_pipeline.json",
+        download_check="texturing_pipeline.json",
+        input_kind="image",
+        output_kind="mesh",
+        params_schema=TEXTURE_MESH_PARAMS_SCHEMA,
     ),
 }
 
@@ -184,7 +241,7 @@ class Trellis2Generator(BaseGenerator):
         pipeline_cls = self._resolve_pipeline_class(capability)
 
         print(f"[Trellis2Generator] Loading {capability.capability_id} model from {self.model_dir}...")
-        pipe = pipeline_cls.from_pretrained(str(self.model_dir))
+        pipe = pipeline_cls.from_pretrained(str(self.model_dir), config_file=capability.config_file)
         pipe.cuda()
 
         self._model = pipe
@@ -207,6 +264,8 @@ class Trellis2Generator(BaseGenerator):
         capability = self._capability()
         if capability.capability_id == "image-to-mesh":
             return self._generate_image_to_mesh(image_bytes, params, progress_cb, cancel_event)
+        if capability.capability_id == "texture-mesh":
+            return self._generate_texture_mesh(image_bytes, params, progress_cb, cancel_event)
         raise RuntimeError(f"[Trellis2Generator] Unsupported capability '{capability.capability_id}'.")
 
     # ------------------------------------------------------------------ #
@@ -290,7 +349,11 @@ class Trellis2Generator(BaseGenerator):
 
     @classmethod
     def params_schema(cls) -> list:
-        return CAPABILITIES["generate"].params_schema
+        return cls.capability_params_schema("generate")
+
+    @classmethod
+    def capability_params_schema(cls, node_id: str) -> list:
+        return CAPABILITIES.get(node_id, CAPABILITIES["generate"]).params_schema
 
     def _capability(self) -> CapabilityConfig:
         node_id = getattr(self.model_dir, "name", "")
@@ -306,7 +369,79 @@ class Trellis2Generator(BaseGenerator):
         if capability.capability_id == "image-to-mesh":
             from trellis2.pipelines import Trellis2ImageTo3DPipeline
             return Trellis2ImageTo3DPipeline
+        if capability.capability_id == "texture-mesh":
+            from trellis2.pipelines import Trellis2TexturingPipeline
+            return Trellis2TexturingPipeline
         raise RuntimeError(f"[Trellis2Generator] No pipeline is configured for '{capability.capability_id}'.")
+
+    def _resolve_mesh_path(self, params: dict) -> Path:
+        mesh_path = params.get("mesh_path")
+        if not isinstance(mesh_path, str) or not mesh_path.strip():
+            raise RuntimeError(
+                "[Trellis2Generator] The 'texture-mesh' capability requires a mesh side-input. "
+                "Expected params.mesh_path to point to an existing mesh file."
+            )
+
+        candidate_path = Path(mesh_path).expanduser()
+        search_paths = [candidate_path]
+        if not candidate_path.is_absolute():
+            workspace_dir = self._runtime_workspace_dir(params)
+            if workspace_dir is not None:
+                search_paths.insert(0, workspace_dir / candidate_path)
+
+        resolved_path = next((path for path in search_paths if path.exists() and path.is_file()), None)
+        if resolved_path is None:
+            searched_locations = ", ".join(str(path) for path in search_paths)
+            raise RuntimeError(
+                f"[Trellis2Generator] Mesh side-input was not found. Checked: {searched_locations}. "
+                "Ensure the workflow provides a valid mesh connection."
+            )
+        return resolved_path
+
+    def _runtime_workspace_dir(self, params: dict) -> Path | None:
+        workspace_candidates = [
+            params.get("workspace_dir"),
+            getattr(self, "workspace_dir", None),
+            getattr(self, "workspace", None),
+            getattr(self, "runtime_workspace_dir", None),
+        ]
+
+        outputs_dir = getattr(self, "outputs_dir", None)
+        if outputs_dir is not None:
+            workspace_candidates.append(Path(outputs_dir).parent)
+
+        for candidate in workspace_candidates:
+            if candidate is None:
+                continue
+            candidate_path = Path(candidate).expanduser()
+            if candidate_path.exists() and candidate_path.is_dir():
+                return candidate_path
+        return None
+
+    def _load_input_mesh(self, mesh_path: Path):
+        import trimesh
+
+        try:
+            mesh = trimesh.load(str(mesh_path), force="mesh", process=False)
+        except Exception as exc:
+            raise RuntimeError(
+                f"[Trellis2Generator] Failed to load mesh side-input '{mesh_path}': {exc}"
+            ) from exc
+
+        if isinstance(mesh, trimesh.Scene):
+            geometries = [geometry for geometry in mesh.geometry.values() if isinstance(geometry, trimesh.Trimesh)]
+            if not geometries:
+                raise RuntimeError(
+                    f"[Trellis2Generator] Mesh side-input '{mesh_path}' did not contain any mesh geometry."
+                )
+            mesh = trimesh.util.concatenate(geometries)
+
+        if not isinstance(mesh, trimesh.Trimesh):
+            raise RuntimeError(
+                f"[Trellis2Generator] Mesh side-input '{mesh_path}' could not be normalized into a trimesh.Trimesh instance."
+            )
+
+        return mesh
 
     def _generate_image_to_mesh(
         self,
@@ -381,6 +516,57 @@ class Trellis2Generator(BaseGenerator):
 
         output_path = self._next_output_path()
         glb.export(str(output_path), extension_webp=True)
+        self._report(progress_cb, 100, "Done")
+        return output_path
+
+    def _generate_texture_mesh(
+        self,
+        image_bytes: bytes,
+        params: dict,
+        progress_cb: Optional[Callable[[int, str], None]] = None,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> Path:
+        mesh_path = self._resolve_mesh_path(params)
+        pipeline_type = str(params.get("pipeline_type", "1024"))
+        if pipeline_type not in {"512", "1024"}:
+            raise RuntimeError(
+                f"[Trellis2Generator] Unsupported texture pipeline_type '{pipeline_type}'. Expected '512' or '1024'."
+            )
+
+        tex_steps = int(params.get("tex_steps", 12))
+        seed = int(params.get("seed", 42))
+        texture_size = int(params.get("texture_size", 4096))
+        resolution = int(pipeline_type)
+
+        self._report(progress_cb, 5, "Loading image...")
+        image = self._load_image(image_bytes)
+        self._check_cancelled(cancel_event)
+
+        self._report(progress_cb, 10, "Loading mesh...")
+        mesh = self._load_input_mesh(mesh_path)
+        self._check_cancelled(cancel_event)
+
+        self._report(progress_cb, 15, "Generating textures...")
+        textured_mesh = self._run_with_smoothed_progress(
+            progress_cb,
+            start=15,
+            end=92,
+            label="Generating textures...",
+            run=lambda: self._model.run(
+                mesh,
+                image,
+                seed=seed,
+                preprocess_image=True,
+                resolution=resolution,
+                texture_size=texture_size,
+                tex_slat_sampler_params={"steps": tex_steps},
+            ),
+        )
+        self._check_cancelled(cancel_event)
+
+        output_path = self._next_output_path()
+        self._report(progress_cb, 95, "Exporting textured GLB...")
+        textured_mesh.export(str(output_path), file_type="glb")
         self._report(progress_cb, 100, "Done")
         return output_path
 

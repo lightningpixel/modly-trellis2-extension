@@ -80,6 +80,13 @@ class DinoV3FeatureExtractor:
 
     def extract_features(self, image: torch.Tensor) -> torch.Tensor:
         image = image.to(self.model.embeddings.patch_embeddings.weight.dtype)
+        # transformers 5.x wraps the encoder blocks under self.model and exposes
+        # a normalized last_hidden_state from forward(), so the older upstream
+        # manual layer walk is no longer available on the top-level model.
+        if not hasattr(self.model, 'layer'):
+            outputs = self.model(image)
+            return outputs.last_hidden_state
+
         hidden_states = self.model.embeddings(image, bool_masked_pos=None)
         position_embeddings = self.model.rope_embeddings(image)
 

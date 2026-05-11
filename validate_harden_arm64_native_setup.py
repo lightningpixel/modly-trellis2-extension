@@ -91,6 +91,109 @@ def stubbed_generator_imports():
                 sys.modules[name] = module
 
 
+@contextmanager
+def stubbed_image_feature_extractor_imports():
+    module_names = [
+        "torch",
+        "torch.nn",
+        "torch.nn.functional",
+        "torchvision",
+        "torchvision.transforms",
+        "transformers",
+        "numpy",
+        "PIL",
+        "PIL.Image",
+    ]
+    original = {name: sys.modules.get(name) for name in module_names}
+
+    class FakeTensor:
+        def __init__(self, value=None, shape=(1, 2, 3)):
+            self.value = value
+            self.shape = shape
+            self.dtype = "fake-dtype"
+
+        def to(self, _dtype):
+            return self
+
+    torch_module = types.ModuleType("torch")
+    torch_module.Tensor = FakeTensor
+    torch_module.no_grad = lambda: (lambda fn: fn)
+    torch_module.from_numpy = lambda value: FakeTensor(value=value)
+    torch_module.stack = lambda values: FakeTensor(value=values)
+    torch_module.hub = types.SimpleNamespace(load=lambda *args, **kwargs: None)
+
+    torch_nn_module = types.ModuleType("torch.nn")
+    torch_nn_functional = types.ModuleType("torch.nn.functional")
+    torch_nn_functional.layer_norm = lambda hidden_states, normalized_shape: {
+        "hidden_states": getattr(hidden_states, "value", hidden_states),
+        "normalized_shape": normalized_shape,
+    }
+    torch_nn_module.functional = torch_nn_functional
+    torch_module.nn = torch_nn_module
+
+    transforms_module = types.ModuleType("torchvision.transforms")
+
+    class Compose:
+        def __init__(self, transforms):
+            self.transforms = transforms
+
+        def __call__(self, value):
+            for transform in self.transforms:
+                value = transform(value)
+            return value
+
+    class Normalize:
+        def __init__(self, mean, std):
+            self.mean = mean
+            self.std = std
+
+        def __call__(self, value):
+            return value
+
+    transforms_module.Compose = Compose
+    transforms_module.Normalize = Normalize
+    torchvision_module = types.ModuleType("torchvision")
+    torchvision_module.transforms = transforms_module
+
+    transformers_module = types.ModuleType("transformers")
+
+    class DINOv3ViTModel:
+        @classmethod
+        def from_pretrained(cls, _model_name):
+            return cls()
+
+    transformers_module.DINOv3ViTModel = DINOv3ViTModel
+
+    numpy_module = types.ModuleType("numpy")
+    numpy_module.float32 = "float32"
+    numpy_module.array = lambda value: value
+
+    pil_module = types.ModuleType("PIL")
+    pil_image = types.ModuleType("PIL.Image")
+    pil_image.Image = type("Image", (), {})
+    pil_image.LANCZOS = "LANCZOS"
+    pil_module.Image = pil_image
+
+    sys.modules["torch"] = torch_module
+    sys.modules["torch.nn"] = torch_nn_module
+    sys.modules["torch.nn.functional"] = torch_nn_functional
+    sys.modules["torchvision"] = torchvision_module
+    sys.modules["torchvision.transforms"] = transforms_module
+    sys.modules["transformers"] = transformers_module
+    sys.modules["numpy"] = numpy_module
+    sys.modules["PIL"] = pil_module
+    sys.modules["PIL.Image"] = pil_image
+
+    try:
+        yield FakeTensor
+    finally:
+        for name, module in original.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+
+
 def assert_true(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
@@ -295,6 +398,26 @@ def test_optional_and_core_native_install_contracts() -> None:
 
         with patched_attr(setup, "install_from_repo", fail_optional):
             setup.install_optional_native_dependencies(Path("/tmp/venv"), Path("/tmp"), {}, desktop_plan)
+
+
+def test_python_runtime_dependency_contract() -> None:
+    setup = load_module("modly_setup_validation_runtime_deps", "setup.py")
+    assert_true("kornia" in setup.PYTHON_RUNTIME_DEPENDENCIES, "Clean install contract must include kornia")
+    assert_true("timm" in setup.PYTHON_RUNTIME_DEPENDENCIES, "Clean install contract must include timm")
+
+    captured = []
+
+    def fake_pip(_venv, *args, env=None):
+        del env
+        captured.append(args)
+
+    with patched_attr(setup, "pip", fake_pip):
+        setup.install_python_runtime_dependencies(Path("/tmp/venv"))
+
+    assert_true(
+        captured == [("install", *setup.PYTHON_RUNTIME_DEPENDENCIES)],
+        "Python runtime dependency install flow changed unexpectedly",
+    )
 
 
 def test_native_build_env_steering_for_arm64_source_builds() -> None:
@@ -520,22 +643,83 @@ def test_vendor_precedence_guards() -> None:
 
 def test_phase1_manifest_and_docs_contract() -> None:
     manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
-    nodes = manifest.get("nodes", [])
-    assert_true(len(nodes) == 1, "Phase 1 must expose exactly one runtime node")
+    nodes = {node["id"]: node for node in manifest.get("nodes", [])}
+    assert_true(set(nodes) == {"generate", "texture-mesh"}, "Phase 2 must expose both generate and texture-mesh nodes")
 
-    node = nodes[0]
-    assert_true(node["id"] == "generate", "Phase 1 must preserve the working node id 'generate'")
-    assert_true(node.get("capability_id") == "image-to-mesh", "Manifest must label the current node as image-to-mesh")
-    assert_true(node.get("weight_owner_id") == "base-4b", "Manifest must declare the shared weight owner for future node expansion")
-    assert_true(node.get("input") == "image" and node.get("output") == "mesh", "Phase 1 node contract must remain image -> mesh")
+    image_node = nodes["generate"]
+    assert_true(image_node["id"] == "generate", "Phase 2 must preserve the working node id 'generate'")
+    assert_true(image_node.get("capability_id") == "image-to-mesh", "Manifest must label the compatibility node as image-to-mesh")
+    assert_true(image_node.get("weight_owner_id") == "base-4b", "Manifest must declare the shared weight owner for TRELLIS nodes")
+    assert_true(image_node.get("input") == "image" and image_node.get("output") == "mesh", "Generate node contract must remain image -> mesh")
+
+    texture_node = nodes["texture-mesh"]
+    assert_true(texture_node.get("capability_id") == "texture-mesh", "Manifest must label the texturing node as texture-mesh")
+    assert_true(texture_node.get("weight_owner_id") == "base-4b", "Texture node must reuse the shared TRELLIS weight owner")
+    assert_true(texture_node.get("input") == "image" and texture_node.get("output") == "mesh", "Texture node contract must remain image -> mesh")
+    assert_true(texture_node.get("download_check") == "texturing_pipeline.json", "Texture node must download-check the texturing pipeline config")
+
+    inputs = texture_node.get("inputs")
+    assert_true(isinstance(inputs, list) and len(inputs) == 2, "Texture node must declare exactly two named inputs")
+    assert_true(inputs == [
+        {"name": "image", "label": "Reference Image", "type": "image", "required": True},
+        {"name": "mesh", "label": "Source Mesh", "type": "mesh", "required": True},
+    ], "Texture node inputs must use current Modly named-port manifest format")
 
     with stubbed_generator_imports():
-        generator = load_module("modly_generator_phase1_validation", "generator.py")
-        assert_true(node.get("params_schema") == generator.IMAGE_TO_MESH_PARAMS_SCHEMA, "Manifest params_schema must stay aligned with generator image-to-mesh schema")
+        generator = load_module("modly_generator_phase2_validation", "generator.py")
+        assert_true(image_node.get("params_schema") == generator.IMAGE_TO_MESH_PARAMS_SCHEMA, "Manifest params_schema must stay aligned with generator image-to-mesh schema")
+        assert_true(texture_node.get("params_schema") == generator.TEXTURE_MESH_PARAMS_SCHEMA, "Manifest params_schema must stay aligned with generator texture-mesh schema")
         assert_true(generator.CAPABILITIES["generate"].capability_id == "image-to-mesh", "Generator capability map must resolve 'generate' to image-to-mesh")
+        assert_true(generator.CAPABILITIES["texture-mesh"].capability_id == "texture-mesh", "Generator capability map must resolve 'texture-mesh' correctly")
+        assert_true(generator.CAPABILITIES["generate"].config_file == "pipeline.json", "Image capability must keep the default pipeline config")
+        assert_true(generator.CAPABILITIES["texture-mesh"].config_file == "texturing_pipeline.json", "Texture capability must point at the texturing pipeline config")
+        assert_true(generator.CAPABILITIES["texture-mesh"].download_check == "texturing_pipeline.json", "Texture capability download check must match the texturing pipeline config")
+        assert_true(generator.Trellis2Generator.params_schema() == generator.IMAGE_TO_MESH_PARAMS_SCHEMA, "Default params_schema must preserve Phase 1 compatibility")
+        assert_true(generator.Trellis2Generator.capability_params_schema("texture-mesh") == generator.TEXTURE_MESH_PARAMS_SCHEMA, "Capability-specific params_schema lookup must support texture-mesh")
+
+
+def test_capability_specific_pipeline_loading() -> None:
+    with stubbed_generator_imports():
+        generator = load_module("modly_generator_load_validation", "generator.py")
+
+        loaded: list[tuple[str, str]] = []
+
+        class FakePipeline:
+            def __init__(self, capability_id: str):
+                self.capability_id = capability_id
+
+            def cuda(self):
+                loaded.append((self.capability_id, "cuda"))
+
+        class FakePipelineClass:
+            def __init__(self, capability_id: str):
+                self.capability_id = capability_id
+
+            def from_pretrained(self, model_dir: str, *, config_file: str):
+                loaded.append((model_dir, config_file))
+                return FakePipeline(self.capability_id)
+
+        for node_id, expected_config in (("generate", "pipeline.json"), ("texture-mesh", "texturing_pipeline.json")):
+            instance = generator.Trellis2Generator.__new__(generator.Trellis2Generator)
+            instance._model = None
+            instance.model_dir = ROOT / node_id
+            instance._auto_download = lambda: (_ for _ in ()).throw(AssertionError("auto-download should not run during config load validation"))
+            instance._setup_env = lambda: None
+            instance._setup_vendor = lambda: None
+            capability = generator.CAPABILITIES[node_id]
+            instance._capability = lambda capability=capability: capability
+            instance._resolve_pipeline_class = lambda capability, node_id=node_id: FakePipelineClass(node_id)
+            instance.is_downloaded = lambda: True
+
+            instance.load()
+
+            assert_true(loaded[-2] == (str(instance.model_dir), expected_config), f"{node_id} must load the expected pipeline config")
+            assert_true(loaded[-1] == (node_id, "cuda"), f"{node_id} must still move the pipeline onto CUDA")
 
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert_true("trellis-2/generate" in readme, "README must document the currently supported node")
+    assert_true("trellis-2/texture-mesh" in readme, "README must document the texture-mesh node")
+    assert_true("image + mesh -> mesh" in readme, "README must document the texture-mesh workflow shape")
     assert_true("text-to-image -> trellis-2/generate" in readme, "README must document the workflow recommendation for prompt-first UX")
     assert_true("https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m" in readme, "README must include the gated DINOv3 dependency link")
     assert_true("https://huggingface.co/briaai/RMBG-2.0" in readme, "README must include the gated RMBG dependency link")
@@ -543,14 +727,191 @@ def test_phase1_manifest_and_docs_contract() -> None:
     assert_true("24 GB VRAM" in readme, "README must describe practical VRAM expectations")
 
 
+def test_texture_mesh_generator_dispatch_and_validation() -> None:
+    with stubbed_generator_imports():
+        generator = load_module("modly_generator_texture_dispatch_validation", "generator.py")
+
+        dispatch_instance = generator.Trellis2Generator.__new__(generator.Trellis2Generator)
+        dispatch_instance._generate_image_to_mesh = lambda *args, **kwargs: "image-path"
+        dispatch_instance._generate_texture_mesh = lambda *args, **kwargs: "texture-path"
+
+        dispatch_instance._capability = lambda: generator.CAPABILITIES["generate"]
+        assert_true(
+            dispatch_instance.generate(b"img", {}, None, None) == "image-path",
+            "Generate node dispatch must keep image-to-mesh behavior stable",
+        )
+
+        dispatch_instance._capability = lambda: generator.CAPABILITIES["texture-mesh"]
+        assert_true(
+            dispatch_instance.generate(b"img", {}, None, None) == "texture-path",
+            "Texture node dispatch must route to texture-mesh implementation",
+        )
+
+        validation_instance = generator.Trellis2Generator.__new__(generator.Trellis2Generator)
+        try:
+            validation_instance._resolve_mesh_path({})
+        except RuntimeError as exc:
+            assert_true("requires a mesh side-input" in str(exc), "Missing mesh_path must raise a clear validation error")
+        else:
+            raise AssertionError("Missing mesh_path should fail validation")
+
+        try:
+            validation_instance._resolve_mesh_path({"mesh_path": "/definitely/missing/example.glb"})
+        except RuntimeError as exc:
+            assert_true("Mesh side-input was not found" in str(exc), "Invalid mesh_path must raise a clear validation error")
+        else:
+            raise AssertionError("Invalid mesh_path should fail validation")
+
+        with tempfile.TemporaryDirectory(prefix="trellis2-texture-mesh-") as tmp:
+            mesh_path = Path(tmp) / "input.glb"
+            mesh_path.write_bytes(b"mesh")
+
+            relative_instance = generator.Trellis2Generator.__new__(generator.Trellis2Generator)
+            relative_instance.outputs_dir = Path(tmp) / "workspace" / "outputs"
+            relative_instance.outputs_dir.parent.mkdir(parents=True, exist_ok=True)
+            relative_mesh_dir = relative_instance.outputs_dir.parent / "meshes"
+            relative_mesh_dir.mkdir(parents=True, exist_ok=True)
+            relative_mesh_path = relative_mesh_dir / "input.glb"
+            relative_mesh_path.write_bytes(b"mesh")
+            assert_true(
+                relative_instance._resolve_mesh_path({"mesh_path": "meshes/input.glb"}) == relative_mesh_path,
+                "Relative mesh_path must resolve against the runtime workspace directory",
+            )
+
+            fake_trimesh = types.ModuleType("trimesh")
+            loaded_paths: list[tuple[str, str, bool]] = []
+            exported_paths: list[tuple[str, str | None]] = []
+            model_calls: list[dict[str, object]] = []
+            
+            class FakeMesh:
+                pass
+
+            loaded_mesh = FakeMesh()
+
+            def fake_load(path: str, force: str | None = None, process: bool = True):
+                loaded_paths.append((path, str(force), process))
+                return loaded_mesh
+
+            class FakeTexturedMesh:
+                def export(self, path: str, file_type: str | None = None):
+                    exported_paths.append((path, file_type))
+
+            fake_trimesh.load = fake_load
+            fake_trimesh.Trimesh = FakeMesh
+            fake_trimesh.Scene = type("FakeScene", (), {})
+            original_trimesh = sys.modules.get("trimesh")
+            sys.modules["trimesh"] = fake_trimesh
+
+            try:
+                runtime_instance = generator.Trellis2Generator.__new__(generator.Trellis2Generator)
+                runtime_instance._model = types.SimpleNamespace(
+                    run=lambda mesh, image, **kwargs: model_calls.append({"mesh": mesh, "image": image, **kwargs}) or FakeTexturedMesh()
+                )
+                runtime_instance.outputs_dir = Path(tmp) / "outputs"
+                runtime_instance._report = lambda *_args, **_kwargs: None
+                runtime_instance._check_cancelled = lambda *_args, **_kwargs: None
+                runtime_instance._load_image = lambda _bytes: "decoded-image"
+                runtime_instance._run_with_smoothed_progress = lambda _progress_cb, **kwargs: kwargs["run"]()
+
+                output_path = runtime_instance._generate_texture_mesh(
+                    b"image-bytes",
+                    {
+                        "mesh_path": str(mesh_path),
+                        "pipeline_type": "512",
+                        "tex_steps": 9,
+                        "texture_size": 2048,
+                        "seed": 7,
+                    },
+                )
+            finally:
+                if original_trimesh is None:
+                    sys.modules.pop("trimesh", None)
+                else:
+                    sys.modules["trimesh"] = original_trimesh
+
+            assert_true(loaded_paths == [(str(mesh_path), "mesh", False)], "Texture generation must load the provided mesh path as a mesh without trimesh processing")
+            assert_true(len(model_calls) == 1, "Texture generation must invoke the TRELLIS texturing pipeline exactly once")
+            assert_true(model_calls[0]["mesh"] is loaded_mesh, "Texture generation must pass the loaded mesh into the TRELLIS texturing pipeline")
+            assert_true(model_calls[0]["image"] == "decoded-image", "Texture generation must decode and pass the image prompt")
+            assert_true(model_calls[0]["resolution"] == 512, "Texture generation must map pipeline_type onto TRELLIS texturing resolution")
+            assert_true(model_calls[0]["texture_size"] == 2048, "Texture generation must forward texture_size")
+            assert_true(model_calls[0]["seed"] == 7, "Texture generation must forward seed")
+            assert_true(model_calls[0]["tex_slat_sampler_params"] == {"steps": 9}, "Texture generation must forward tex_steps to TRELLIS sampler params")
+            assert_true(exported_paths == [(str(output_path), "glb")], "Texture generation must export the resulting textured mesh as GLB")
+
+
+def test_dinov3_transformers_compatibility_patch() -> None:
+    with stubbed_image_feature_extractor_imports() as fake_tensor:
+        module = load_module(
+            "modly_image_feature_extractor_validation",
+            "vendor/trellis2/modules/image_feature_extractor.py",
+        )
+
+        fallback_extractor = module.DinoV3FeatureExtractor.__new__(module.DinoV3FeatureExtractor)
+        fallback_extractor.model = types.SimpleNamespace(
+            embeddings=types.SimpleNamespace(
+                patch_embeddings=types.SimpleNamespace(weight=types.SimpleNamespace(dtype="float16"))
+            ),
+            __call__=lambda _image: types.SimpleNamespace(last_hidden_state="fallback-last-hidden-state"),
+        )
+
+        # types.SimpleNamespace does not dispatch __call__, so wrap it in a callable object.
+        class ForwardOnlyModel:
+            def __init__(self):
+                self.embeddings = fallback_extractor.model.embeddings
+
+            def __call__(self, _image):
+                return types.SimpleNamespace(last_hidden_state="fallback-last-hidden-state")
+
+        fallback_extractor.model = ForwardOnlyModel()
+        assert_true(
+            fallback_extractor.extract_features(fake_tensor()) == "fallback-last-hidden-state",
+            "DINOv3 fallback must use outputs.last_hidden_state when transformers no longer exposes top-level .layer",
+        )
+
+        manual_extractor = module.DinoV3FeatureExtractor.__new__(module.DinoV3FeatureExtractor)
+
+        class FakeLayer:
+            def __call__(self, hidden_states, position_embeddings=None):
+                del position_embeddings
+                return fake_tensor(value=f"{hidden_states.value}-layered")
+
+        manual_extractor.model = types.SimpleNamespace(
+            embeddings=types.SimpleNamespace(
+                patch_embeddings=types.SimpleNamespace(weight=types.SimpleNamespace(dtype="float16")),
+                __call__=lambda image, bool_masked_pos=None: fake_tensor(value="embedded"),
+            ),
+            rope_embeddings=lambda image: "rope",
+            layer=[FakeLayer()],
+        )
+
+        class Embeddings:
+            patch_embeddings = types.SimpleNamespace(weight=types.SimpleNamespace(dtype="float16"))
+
+            def __call__(self, image, bool_masked_pos=None):
+                del image, bool_masked_pos
+                return fake_tensor(value="embedded")
+
+        manual_extractor.model.embeddings = Embeddings()
+        normalized = manual_extractor.extract_features(fake_tensor())
+        assert_true(
+            normalized == {"hidden_states": "embedded-layered", "normalized_shape": (3,)},
+            "Manual DINOv3 layer walk must stay available for older transformers layouts",
+        )
+
+
 def main() -> None:
     test_setup_plan_and_attention()
     test_optional_and_core_native_install_contracts()
+    test_python_runtime_dependency_contract()
     test_native_build_env_steering_for_arm64_source_builds()
     test_arm64_spconv_source_build_env()
     test_patch_installed_cumm_cuda_discovery()
     test_vendor_precedence_guards()
     test_phase1_manifest_and_docs_contract()
+    test_capability_specific_pipeline_loading()
+    test_texture_mesh_generator_dispatch_and_validation()
+    test_dinov3_transformers_compatibility_patch()
     print("validate_harden_arm64_native_setup: OK")
 
 

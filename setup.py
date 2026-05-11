@@ -43,6 +43,25 @@ TRELLIS2_SOURCE_REPO = "https://github.com/microsoft/TRELLIS.2.git"
 TRELLIS2_SOURCE_REF = "5565d240c4a494caaf9ece7a554542b76ffa36d3"
 O_VOXEL_SUBDIRECTORY = "o-voxel"
 O_VOXEL_SUPPORT_PACKAGES = ("plyfile", "zstandard")
+PYTHON_RUNTIME_DEPENDENCIES = (
+    "Pillow",
+    "numpy",
+    "opencv-python-headless",
+    "huggingface_hub",
+    "transformers>=4.46.0",
+    "accelerate",
+    "safetensors",
+    "imageio",
+    "imageio-ffmpeg",
+    "easydict",
+    "tqdm",
+    "trimesh",
+    "scipy",
+    "scikit-image",
+    "kornia",
+    "timm",
+    "ninja",
+)
 OPTIONAL_NVDIFFREC_ENV = "MODLY_TRELLIS2_INSTALL_NVDIFFREC"
 CUMM_CUDA_DISCOVERY_PATCH_MARKER = "modly_trellis2_cuda_root_override"
 CUMM_SUPPORTED_CUDA_ARCHES = frozenset(
@@ -684,6 +703,10 @@ def select_torch(gpu_sm: int, cuda_version: int) -> tuple[list[str], str, str]:
     return (["torch==2.5.1", "torchvision==0.20.1"], "https://download.pytorch.org/whl/cu118", "cu118")
 
 
+def install_python_runtime_dependencies(venv: Path) -> None:
+    pip(venv, "install", *PYTHON_RUNTIME_DEPENDENCIES)
+
+
 def setup(python_exe: str, ext_dir: Path, gpu_sm: int, cuda_version: int = 0) -> None:
     venv = ext_dir / "venv"
     build_env = os.environ.copy()
@@ -701,25 +724,7 @@ def setup(python_exe: str, ext_dir: Path, gpu_sm: int, cuda_version: int = 0) ->
     pip(venv, "install", *torch_pkgs, "--index-url", torch_index)
 
     print("[setup] Installing Python runtime dependencies ...")
-    pip(
-        venv,
-        "install",
-        "Pillow",
-        "numpy",
-        "opencv-python-headless",
-        "huggingface_hub",
-        "transformers>=4.46.0",
-        "accelerate",
-        "safetensors",
-        "imageio",
-        "imageio-ffmpeg",
-        "easydict",
-        "tqdm",
-        "trimesh",
-        "scipy",
-        "scikit-image",
-        "ninja",
-    )
+    install_python_runtime_dependencies(venv)
 
     install_spconv(venv, cuda_tag, gpu_sm, build_env)
     chosen_attention_backend = install_attention_backend(venv, plan)

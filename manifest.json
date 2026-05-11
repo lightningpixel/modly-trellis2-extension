@@ -3,7 +3,7 @@
   "name": "TRELLIS.2",
   "type": "model",
   "source": "https://github.com/DrHepa/modly-trellis2-extension",
-  "description": "TRELLIS.2 image-to-mesh extension for Modly. Phase 1 currently ships the image-guided mesh generation path only and keeps the working `generate` node id for compatibility.",
+  "description": "TRELLIS.2 extension for Modly with production-safe image-to-mesh compatibility plus image-guided mesh texturing.",
   "version": "1.0.0",
   "author": "Lightning Pixel",
   "generator_class": "Trellis2Generator",
@@ -85,6 +85,74 @@
           ],
           "default": 4096,
           "tooltip": "Resolution of the baked PBR texture atlas (base color, roughness, metallic)."
+        },
+        {
+          "id": "seed",
+          "label": "Seed",
+          "type": "int",
+          "default": 42,
+          "min": 0,
+          "max": 2147483647,
+          "tooltip": "Seed for reproducibility. Click shuffle for a random seed."
+        }
+      ]
+    },
+    {
+      "id": "texture-mesh",
+      "name": "Texture Mesh",
+      "capability_id": "texture-mesh",
+      "description": "Texture an existing mesh from one reference image using the official TRELLIS.2 texturing pipeline.",
+      "input": "image",
+      "inputs": [
+        {
+          "name": "image",
+          "label": "Reference Image",
+          "type": "image",
+          "required": true
+        },
+        {
+          "name": "mesh",
+          "label": "Source Mesh",
+          "type": "mesh",
+          "required": true
+        }
+      ],
+      "output": "mesh",
+      "weight_owner_id": "base-4b",
+      "hf_repo": "microsoft/TRELLIS.2-4B",
+      "download_check": "texturing_pipeline.json",
+      "params_schema": [
+        {
+          "id": "pipeline_type",
+          "label": "Texture Resolution",
+          "type": "select",
+          "options": [
+            { "value": "512", "label": "512³" },
+            { "value": "1024", "label": "1024³" }
+          ],
+          "default": "1024",
+          "tooltip": "Internal voxel/texturing resolution used by the TRELLIS.2 texturing pipeline. 1024 gives better fidelity but costs more VRAM and time."
+        },
+        {
+          "id": "tex_steps",
+          "label": "Texture SLAT Steps",
+          "type": "int",
+          "default": 12,
+          "min": 1,
+          "max": 50,
+          "tooltip": "Diffusion steps for the texture latent stage. More steps = sharper textures."
+        },
+        {
+          "id": "texture_size",
+          "label": "Texture Size",
+          "type": "select",
+          "options": [
+            { "value": 2048, "label": "2048" },
+            { "value": 4096, "label": "4096" },
+            { "value": 8192, "label": "8192" }
+          ],
+          "default": 4096,
+          "tooltip": "Resolution of the exported texture atlas. Higher values improve detail but increase memory and export time."
         },
         {
           "id": "seed",

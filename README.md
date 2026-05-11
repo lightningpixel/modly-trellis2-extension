@@ -4,22 +4,30 @@ TRELLIS.2 extension for Modly.
 
 ## What works today
 
-- One production-safe node is exposed: `trellis-2/generate`
-- That node is an **image-to-mesh** capability
+- Two runtime nodes are exposed: `trellis-2/generate` and `trellis-2/texture-mesh`
+- `trellis-2/generate` is the production-safe **image-to-mesh** compatibility node
 - Output is a textured `.glb` mesh generated from a single input image
+- A second node is now exposed: `trellis-2/texture-mesh`
+- That node is an **image + mesh -> textured mesh** capability backed by the upstream TRELLIS.2 texturing pipeline
 - Clean install now completes against current Modly and current extension setup
 
 ## What does NOT work yet
 
-- No final `texture-mesh` runtime node is exposed in Phase 1
 - No native TRELLIS text-to-mesh node is exposed
-- Modly core still serializes only `image_b64` for extension model runs, so multi-input TRELLIS workflows are NOT ready yet
+- This phase still does NOT expose native TRELLIS text-to-mesh; prompt-first UX remains `text-to-image -> trellis-2/generate`
 
 If you want a prompt-first UX today, compose it as:
 
 `text-to-image -> trellis-2/generate`
 
 Do NOT treat this extension as native TRELLIS text-to-mesh yet.
+
+## Current workflow shapes
+
+- `trellis-2/generate`: `image -> mesh`
+- `trellis-2/texture-mesh`: `image + mesh -> mesh`
+
+For `texture-mesh`, Modly must provide the side mesh input as `params.mesh_path`. Current workflow wiring already passes named mesh inputs that way, so the extension reads the existing mesh directly from disk and re-exports a textured `.glb`.
 
 ## Gated Hugging Face dependencies
 
@@ -48,7 +56,8 @@ The TRELLIS weights used by the extension are pulled from:
 
 - Manifest node id stays `generate` for compatibility with the currently working Modly contract
 - UI naming is normalized to **Image to Mesh**
-- Shared weight ownership metadata is already present so future TRELLIS nodes can reuse one downloaded snapshot
+- `texture-mesh` reuses the same TRELLIS.2 weight owner metadata so both nodes share one downloaded snapshot
+- This repo intentionally does NOT add native `text -> mesh` in Phase 2
 
 ## Validation
 
