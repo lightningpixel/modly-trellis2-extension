@@ -3,7 +3,7 @@
   "name": "TRELLIS.2",
   "type": "model",
   "source": "https://github.com/DrHepa/modly-trellis2-extension",
-  "description": "TRELLIS.2 extension for Modly with production-safe image-to-mesh compatibility plus image-guided mesh texturing.",
+  "description": "TRELLIS extension for Modly with production-safe TRELLIS.2 image/texturing nodes plus native official TRELLIS text-to-mesh.",
   "version": "1.0.0",
   "author": "Lightning Pixel",
   "generator_class": "Trellis2Generator",
@@ -153,6 +153,92 @@
           ],
           "default": 4096,
           "tooltip": "Resolution of the exported texture atlas. Higher values improve detail but increase memory and export time."
+        },
+        {
+          "id": "seed",
+          "label": "Seed",
+          "type": "int",
+          "default": 42,
+          "min": 0,
+          "max": 2147483647,
+          "tooltip": "Seed for reproducibility. Click shuffle for a random seed."
+        }
+      ]
+    },
+    {
+      "id": "text-to-mesh",
+      "name": "Text to Mesh",
+      "capability_id": "text-to-mesh",
+      "description": "Generate a textured GLB mesh from a text prompt using the official native TRELLIS text pipeline.",
+      "input": "text",
+      "output": "mesh",
+      "weight_owner_id": "text-xlarge",
+      "hf_repo": "microsoft/TRELLIS-text-xlarge",
+      "download_check": "pipeline.json",
+      "params_schema": [
+        {
+          "id": "prompt",
+          "label": "Prompt",
+          "type": "text",
+          "default": "",
+          "tooltip": "Text prompt used by the native TRELLIS text-to-mesh pipeline."
+        },
+        {
+          "id": "sparse_steps",
+          "label": "Sparse Structure Steps",
+          "type": "int",
+          "default": 12,
+          "min": 1,
+          "max": 50,
+          "tooltip": "Diffusion steps for the sparse structure stage."
+        },
+        {
+          "id": "slat_steps",
+          "label": "Structured Latent Steps",
+          "type": "int",
+          "default": 12,
+          "min": 1,
+          "max": 50,
+          "tooltip": "Diffusion steps for the structured latent stage."
+        },
+        {
+          "id": "sparse_cfg",
+          "label": "Sparse CFG",
+          "type": "float",
+          "default": 7.5,
+          "min": 0.0,
+          "max": 20.0,
+          "tooltip": "Classifier-free guidance strength for sparse structure generation."
+        },
+        {
+          "id": "slat_cfg",
+          "label": "Structured Latent CFG",
+          "type": "float",
+          "default": 7.5,
+          "min": 0.0,
+          "max": 20.0,
+          "tooltip": "Classifier-free guidance strength for structured latent generation."
+        },
+        {
+          "id": "texture_size",
+          "label": "Texture Size",
+          "type": "select",
+          "options": [
+            { "value": 1024, "label": "1024" },
+            { "value": 2048, "label": "2048" },
+            { "value": 4096, "label": "4096" }
+          ],
+          "default": 1024,
+          "tooltip": "Resolution of the baked texture atlas used by official TRELLIS postprocessing."
+        },
+        {
+          "id": "simplify",
+          "label": "Simplify Ratio",
+          "type": "float",
+          "default": 0.95,
+          "min": 0.0,
+          "max": 1.0,
+          "tooltip": "Triangle simplification ratio used during GLB postprocessing."
         },
         {
           "id": "seed",

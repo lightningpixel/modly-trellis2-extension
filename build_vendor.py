@@ -22,19 +22,24 @@ import sys
 from pathlib import Path
 
 VENDOR       = Path(__file__).parent / "vendor"
-TRELLIS2_ZIP = "https://github.com/microsoft/TRELLIS.2/archive/refs/heads/main.zip"
+TRELLIS2_REF = "5565d240c4a494caaf9ece7a554542b76ffa36d3"
+TRELLIS2_ZIP = f"https://github.com/microsoft/TRELLIS.2/archive/{TRELLIS2_REF}.zip"
+TRELLIS_REF  = "442aa1e1afb9014e80681d3bf604e8d728a86ee7"
+TRELLIS_ZIP  = f"https://github.com/microsoft/TRELLIS/archive/{TRELLIS_REF}.zip"
+FLEXICUBES_SUBMODULE_PATH = "trellis/representations/mesh/flexicubes"
 
 # Pure-Python packages to vendor (no compilation needed)
 PURE_PACKAGES = [
     "easydict",       # configuration dict used internally by trellis2
     "plyfile",        # PLY mesh format I/O
     "einops",         # tensor reshaping helpers
-    "utils3d",        # 3D math utilities
     "lpips",          # perceptual loss metric
     "trimesh",        # mesh processing
     "tqdm",           # progress bars
     # opencv-python and spconv are too large to vendor in git — installed at runtime via pip
 ]
+
+UTILS3D_REF = "git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8"
 
 # Compiled CUDA extensions to vendor (require --no-build-isolation to find torch)
 # Note: flex_gemm is not on PyPI — spconv is used instead (set via SPARSE_CONV_BACKEND env var)
@@ -64,6 +69,12 @@ def vendor_pure_package(package: str, dest: Path) -> None:
          "--upgrade",
          package])
     print(f"  Vendored {package}.")
+
+
+def vendor_utils3d(dest: Path) -> None:
+    """Install the official TRELLIS utils3d package, not the unrelated PyPI homonym."""
+    run([sys.executable, "-m", "pip", "install", "--no-deps", "--target", str(dest), "--upgrade", UTILS3D_REF])
+    print("  Vendored official utils3d.")
 
 
 def vendor_compiled_package(package: str, dest: Path) -> None:
@@ -101,9 +112,9 @@ def vendor_trellis2(dest: Path) -> None:
     with urllib.request.urlopen(TRELLIS2_ZIP, timeout=180) as resp:
         data = resp.read()
 
-    # The ZIP root folder is "TRELLIS.2-main/" (GitHub archive naming)
-    prefix = "TRELLIS.2-main/trellis2/"
-    strip  = "TRELLIS.2-main/"
+    archive_root = f"TRELLIS.2-{TRELLIS2_REF}/"
+    prefix = f"{archive_root}trellis2/"
+    strip  = archive_root
 
     extracted = 0
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
@@ -128,6 +139,118 @@ def vendor_trellis2(dest: Path) -> None:
         )
 
     print(f"  trellis2/ extracted to {dest} ({extracted} files).")
+
+
+def vendor_trellis(dest: Path) -> None:
+    """Download TRELLIS source and extract the official runtime package into vendor/."""
+    import urllib.request
+    import io
+    import zipfile
+
+    trellis_dest = dest / "trellis"
+    if trellis_dest.exists():
+        print("  trellis/ already present, refreshing submodule-backed runtime files.")
+        sync_trellis_runtime_submodules(dest)
+        return
+
+    print("  Downloading TRELLIS source from GitHub...")
+    with urllib.request.urlopen(TRELLIS_ZIP, timeout=180) as resp:
+        data = resp.read()
+
+    archive_root = f"TRELLIS-{TRELLIS_REF}/"
+    allowed_prefixes = [
+        f"{archive_root}trellis/__init__.py",
+        f"{archive_root}trellis/models/",
+        f"{archive_root}trellis/modules/",
+        f"{archive_root}trellis/pipelines/",
+        f"{archive_root}trellis/renderers/",
+        f"{archive_root}trellis/representations/",
+        f"{archive_root}trellis/utils/",
+    ]
+
+    extracted = 0
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        for member in zf.namelist():
+            if not any(member.startswith(prefix) for prefix in allowed_prefixes):
+                continue
+            rel = member[len(archive_root):]
+            target = dest / rel
+            if member.endswith("/"):
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(zf.read(member))
+                extracted += 1
+
+    if extracted == 0:
+        raise RuntimeError(
+            "No official trellis/ runtime files were extracted from the TRELLIS archive. "
+            "Check the pinned archive layout in vendor_trellis()."
+        )
+
+    print(f"  trellis/ extracted to {dest} ({extracted} files).")
+    sync_trellis_runtime_submodules(dest)
+
+
+def trellis_submodule_ref(path: str) -> tuple[str, str]:
+    """Resolve a TRELLIS submodule URL and pinned commit from GitHub metadata."""
+    import json
+    import urllib.request
+
+    url = f"https://api.github.com/repos/microsoft/TRELLIS/contents/{path}?ref={TRELLIS_REF}"
+    with urllib.request.urlopen(url, timeout=60) as resp:
+        metadata = json.load(resp)
+
+    if metadata.get("type") != "submodule":
+        raise RuntimeError(f"Expected '{path}' to be a TRELLIS submodule at ref {TRELLIS_REF}.")
+
+    repo_url = metadata.get("submodule_git_url")
+    commit = metadata.get("sha")
+    if not repo_url or not commit:
+        raise RuntimeError(f"Missing submodule metadata for '{path}' at ref {TRELLIS_REF}.")
+    return repo_url, commit
+
+
+def vendor_flexicubes_submodule(dest: Path) -> None:
+    """Vendor the FlexiCubes submodule that upstream TRELLIS references for mesh extraction."""
+    import io
+    import urllib.request
+    import zipfile
+
+    repo_url, commit = trellis_submodule_ref(FLEXICUBES_SUBMODULE_PATH)
+    archive_url = f"{repo_url[:-4]}/archive/{commit}.zip" if repo_url.endswith(".git") else f"{repo_url}/archive/{commit}.zip"
+    package_dest = dest / FLEXICUBES_SUBMODULE_PATH
+    package_dest.mkdir(parents=True, exist_ok=True)
+
+    print(f"  Syncing FlexiCubes submodule from {repo_url} @ {commit}...")
+    with urllib.request.urlopen(archive_url, timeout=180) as resp:
+        data = resp.read()
+
+    archive_root = None
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        for member in zf.namelist():
+            if archive_root is None:
+                archive_root = member.split("/", 1)[0] + "/"
+            if member in {f"{archive_root}flexicubes.py", f"{archive_root}tables.py"}:
+                target = package_dest / member[len(archive_root):]
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(zf.read(member))
+
+    expected = [package_dest / "flexicubes.py", package_dest / "tables.py"]
+    missing = [path.name for path in expected if not path.exists()]
+    if missing:
+        raise RuntimeError(
+            "Failed to vendor FlexiCubes runtime files from the pinned TRELLIS submodule: "
+            + ", ".join(missing)
+        )
+
+    (package_dest / "__init__.py").write_text("from .flexicubes import FlexiCubes\n", encoding="utf-8")
+    print(f"  FlexiCubes runtime synced into {package_dest}.")
+
+
+def sync_trellis_runtime_submodules(dest: Path) -> None:
+    """Sync runtime-critical TRELLIS submodules that GitHub source archives omit."""
+    vendor_flexicubes_submodule(dest)
 
 
 # ---------------------------------------------------------------------------
@@ -158,9 +281,18 @@ def main() -> None:
             print(f"  WARNING: failed to vendor {pkg}: {exc}")
             print("  Skipping — it may already be available in the venv.")
 
-    # 2. TRELLIS.2 source
+    print("\n  -> utils3d (official TRELLIS fork)")
+    try:
+        vendor_utils3d(VENDOR)
+    except Exception as exc:
+        print(f"  WARNING: failed to vendor official utils3d: {exc}")
+        print("  Skipping — it may already be available in the venv.")
+
+    # 2. Official TRELLIS runtimes
     print("\n[2] Vendoring trellis2 source...")
     vendor_trellis2(VENDOR)
+    print("\n[2b] Vendoring trellis source...")
+    vendor_trellis(VENDOR)
 
     # 3. Compiled CUDA extensions
     print("\n[3] Vendoring compiled CUDA extensions...")

@@ -39,8 +39,14 @@ NVDIFFREC_SOURCE_REF = "b296927cc7fd01c2ac1087c8065c4d7248f72da4"
 CUMESH_SOURCE_REPO = "https://github.com/JeffreyXiang/CuMesh.git"
 # Pinned from CuMesh HEAD validated for this integration on 2026-04-13.
 CUMESH_SOURCE_REF = "cf1a2f07304b5fe388ed86a16e4a0474599df914"
+MIP_SPLATTING_SOURCE_REPO = "https://github.com/autonomousvision/mip-splatting.git"
+# Pinned from mip-splatting HEAD validated for the TRELLIS Gaussian renderer API on 2026-05-11.
+MIP_SPLATTING_SOURCE_REF = "dda02ab5ecf45d6edb8c540d9bb65c7e451345a9"
+MIP_SPLATTING_DIFF_GAUSSIAN_SUBDIRECTORY = "submodules/diff-gaussian-rasterization"
 TRELLIS2_SOURCE_REPO = "https://github.com/microsoft/TRELLIS.2.git"
 TRELLIS2_SOURCE_REF = "5565d240c4a494caaf9ece7a554542b76ffa36d3"
+TRELLIS_SOURCE_REPO = "https://github.com/microsoft/TRELLIS.git"
+TRELLIS_SOURCE_REF = "442aa1e1afb9014e80681d3bf604e8d728a86ee7"
 O_VOXEL_SUBDIRECTORY = "o-voxel"
 O_VOXEL_SUPPORT_PACKAGES = ("plyfile", "zstandard")
 PYTHON_RUNTIME_DEPENDENCIES = (
@@ -61,6 +67,10 @@ PYTHON_RUNTIME_DEPENDENCIES = (
     "kornia",
     "timm",
     "ninja",
+    "xatlas",
+    "pyvista",
+    "pymeshfix",
+    "igraph",
 )
 OPTIONAL_NVDIFFREC_ENV = "MODLY_TRELLIS2_INSTALL_NVDIFFREC"
 CUMM_CUDA_DISCOVERY_PATCH_MARKER = "modly_trellis2_cuda_root_override"
@@ -621,6 +631,16 @@ def resolve_native_build_env(
 
 def install_core_native_dependencies(venv: Path, tmpdir: Path, build_env: dict[str, str]) -> None:
     print("[setup] Installing core CUDA/native runtime packages ...")
+    install_from_repo(
+        venv,
+        tmpdir,
+        "mip-splatting",
+        MIP_SPLATTING_SOURCE_REPO,
+        ref=MIP_SPLATTING_SOURCE_REF,
+        recursive=True,
+        subdirectory=MIP_SPLATTING_DIFF_GAUSSIAN_SUBDIRECTORY,
+        env=build_env,
+    )
     install_from_repo(
         venv,
         tmpdir,

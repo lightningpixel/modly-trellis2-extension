@@ -25,14 +25,16 @@ To rebuild vendor/:
 
 import importlib.util
 import io
+import json
 import os
+import shutil
 import sys
 import time
 import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from PIL import Image
 
@@ -42,6 +44,8 @@ _EXTENSION_DIR = Path(__file__).parent
 _VENDOR_DIR    = _EXTENSION_DIR / "vendor"
 _OPTIONAL_NVDIFFREC_ENV = "MODLY_TRELLIS2_INSTALL_NVDIFFREC"
 _NATIVE_VENDOR_OVERLAPS = {"nvdiffrast"}
+_TEXT_PIPELINE_CONFIG_FILE = "pipeline.text-localized.json"
+_TEXT_AUX_WEIGHTS_DIR = "localized-aux-weights"
 
 
 IMAGE_TO_MESH_PARAMS_SCHEMA = [
@@ -163,11 +167,89 @@ TEXTURE_MESH_PARAMS_SCHEMA = [
 ]
 
 
+TEXT_TO_MESH_PARAMS_SCHEMA = [
+    {
+        "id": "prompt",
+        "label": "Prompt",
+        "type": "text",
+        "default": "",
+        "tooltip": "Text prompt used by the native TRELLIS text-to-mesh pipeline.",
+    },
+    {
+        "id": "sparse_steps",
+        "label": "Sparse Structure Steps",
+        "type": "int",
+        "default": 12,
+        "min": 1,
+        "max": 50,
+        "tooltip": "Diffusion steps for the sparse structure stage.",
+    },
+    {
+        "id": "slat_steps",
+        "label": "Structured Latent Steps",
+        "type": "int",
+        "default": 12,
+        "min": 1,
+        "max": 50,
+        "tooltip": "Diffusion steps for the structured latent stage.",
+    },
+    {
+        "id": "sparse_cfg",
+        "label": "Sparse CFG",
+        "type": "float",
+        "default": 7.5,
+        "min": 0.0,
+        "max": 20.0,
+        "tooltip": "Classifier-free guidance strength for sparse structure generation.",
+    },
+    {
+        "id": "slat_cfg",
+        "label": "Structured Latent CFG",
+        "type": "float",
+        "default": 7.5,
+        "min": 0.0,
+        "max": 20.0,
+        "tooltip": "Classifier-free guidance strength for structured latent generation.",
+    },
+    {
+        "id": "texture_size",
+        "label": "Texture Size",
+        "type": "select",
+        "options": [
+            {"value": 1024, "label": "1024"},
+            {"value": 2048, "label": "2048"},
+            {"value": 4096, "label": "4096"},
+        ],
+        "default": 1024,
+        "tooltip": "Resolution of the baked texture atlas used by official TRELLIS postprocessing.",
+    },
+    {
+        "id": "simplify",
+        "label": "Simplify Ratio",
+        "type": "float",
+        "default": 0.95,
+        "min": 0.0,
+        "max": 1.0,
+        "tooltip": "Triangle simplification ratio used during GLB postprocessing.",
+    },
+    {
+        "id": "seed",
+        "label": "Seed",
+        "type": "int",
+        "default": 42,
+        "min": 0,
+        "max": 2147483647,
+        "tooltip": "Seed for reproducibility. Click shuffle for a random seed.",
+    },
+]
+
+
 @dataclass(frozen=True)
 class CapabilityConfig:
     node_id: str
     capability_id: str
     display_name: str
+    family: str
     config_file: str
     download_check: str
     input_kind: str
@@ -180,6 +262,7 @@ CAPABILITIES: dict[str, CapabilityConfig] = {
         node_id="generate",
         capability_id="image-to-mesh",
         display_name="Image to Mesh",
+        family="trellis2",
         config_file="pipeline.json",
         download_check="pipeline.json",
         input_kind="image",
@@ -190,13 +273,29 @@ CAPABILITIES: dict[str, CapabilityConfig] = {
         node_id="texture-mesh",
         capability_id="texture-mesh",
         display_name="Texture Mesh",
+        family="trellis2",
         config_file="texturing_pipeline.json",
         download_check="texturing_pipeline.json",
         input_kind="image",
         output_kind="mesh",
         params_schema=TEXTURE_MESH_PARAMS_SCHEMA,
     ),
+    "text-to-mesh": CapabilityConfig(
+        node_id="text-to-mesh",
+        capability_id="text-to-mesh",
+        display_name="Text to Mesh",
+        family="trellis-text",
+        config_file="pipeline.json",
+        download_check="pipeline.json",
+        input_kind="text",
+        output_kind="mesh",
+        params_schema=TEXT_TO_MESH_PARAMS_SCHEMA,
+    ),
 }
+
+_CAPABILITIES_BY_DOWNLOAD_CHECK: dict[str, list[CapabilityConfig]] = {}
+for _capability in CAPABILITIES.values():
+    _CAPABILITIES_BY_DOWNLOAD_CHECK.setdefault(_capability.download_check, []).append(_capability)
 
 
 def filtered_vendor_paths() -> list[str]:
@@ -239,9 +338,12 @@ class Trellis2Generator(BaseGenerator):
 
         capability = self._capability()
         pipeline_cls = self._resolve_pipeline_class(capability)
+        config_file = capability.config_file
+        if capability.family == "trellis-text":
+            config_file = self._prepare_text_pipeline_config(self.model_dir).name
 
         print(f"[Trellis2Generator] Loading {capability.capability_id} model from {self.model_dir}...")
-        pipe = pipeline_cls.from_pretrained(str(self.model_dir), config_file=capability.config_file)
+        pipe = pipeline_cls.from_pretrained(str(self.model_dir), config_file=config_file)
         pipe.cuda()
 
         self._model = pipe
@@ -266,6 +368,8 @@ class Trellis2Generator(BaseGenerator):
             return self._generate_image_to_mesh(image_bytes, params, progress_cb, cancel_event)
         if capability.capability_id == "texture-mesh":
             return self._generate_texture_mesh(image_bytes, params, progress_cb, cancel_event)
+        if capability.capability_id == "text-to-mesh":
+            return self._generate_text_to_mesh(params, progress_cb, cancel_event)
         raise RuntimeError(f"[Trellis2Generator] Unsupported capability '{capability.capability_id}'.")
 
     # ------------------------------------------------------------------ #
@@ -289,6 +393,11 @@ class Trellis2Generator(BaseGenerator):
         self._require_runtime_dependency("o_voxel", "o-voxel")
         self._require_runtime_dependency("cumesh", "CuMesh")
         self._require_runtime_dependency("nvdiffrast", "nvdiffrast", allow_vendor=False)
+        if self._capability().family == "trellis-text":
+            self._require_runtime_dependency("xatlas", "xatlas")
+            self._require_runtime_dependency("pyvista", "pyvista")
+            self._require_runtime_dependency("igraph", "igraph")
+            self._require_runtime_dependency("pymeshfix", "pymeshfix")
 
         if importlib.util.find_spec("xformers") is None and importlib.util.find_spec("flash_attn") is None:
             raise RuntimeError(
@@ -355,14 +464,36 @@ class Trellis2Generator(BaseGenerator):
     def capability_params_schema(cls, node_id: str) -> list:
         return CAPABILITIES.get(node_id, CAPABILITIES["generate"]).params_schema
 
+    def _runtime_node_id(self) -> str:
+        explicit_node_id = getattr(self, "node_id", "")
+        if isinstance(explicit_node_id, str) and explicit_node_id in CAPABILITIES:
+            return explicit_node_id
+
+        model_id = os.environ.get("MODEL_ID", "")
+        if "/" in model_id:
+            _, requested_node_id = model_id.split("/", 1)
+            if requested_node_id in CAPABILITIES:
+                return requested_node_id
+
+        model_dir_name = getattr(self.model_dir, "name", "")
+        if model_dir_name in CAPABILITIES:
+            return model_dir_name
+
+        return ""
+
     def _capability(self) -> CapabilityConfig:
-        node_id = getattr(self.model_dir, "name", "")
+        node_id = self._runtime_node_id()
         if node_id in CAPABILITIES:
             return CAPABILITIES[node_id]
         if self.download_check:
-            for capability in CAPABILITIES.values():
-                if capability.download_check == self.download_check:
-                    return capability
+            matches = _CAPABILITIES_BY_DOWNLOAD_CHECK.get(self.download_check, [])
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                raise RuntimeError(
+                    "[Trellis2Generator] Ambiguous capability resolution for "
+                    f"download_check='{self.download_check}'. Explicit node context is required."
+                )
         return CAPABILITIES["generate"]
 
     def _resolve_pipeline_class(self, capability: CapabilityConfig):
@@ -372,7 +503,85 @@ class Trellis2Generator(BaseGenerator):
         if capability.capability_id == "texture-mesh":
             from trellis2.pipelines import Trellis2TexturingPipeline
             return Trellis2TexturingPipeline
+        if capability.capability_id == "text-to-mesh":
+            from trellis.pipelines import TrellisTextTo3DPipeline
+            return TrellisTextTo3DPipeline
         raise RuntimeError(f"[Trellis2Generator] No pipeline is configured for '{capability.capability_id}'.")
+
+    def _prepare_text_pipeline_config(self, model_dir: Path) -> Path:
+        source_config = model_dir / "pipeline.json"
+        if not source_config.exists():
+            raise RuntimeError(
+                f"[Trellis2Generator] Native text pipeline config is missing at {source_config}."
+            )
+
+        config = json.loads(source_config.read_text(encoding="utf-8"))
+        args = config.get("args")
+        if not isinstance(args, dict):
+            raise RuntimeError("[Trellis2Generator] Text pipeline config is missing an 'args' object.")
+
+        model_refs = args.get("models")
+        if not isinstance(model_refs, dict):
+            raise RuntimeError("[Trellis2Generator] Text pipeline config is missing an 'args.models' object.")
+
+        localized_model_refs = dict(model_refs)
+        localized_any = False
+        for model_name, model_ref in model_refs.items():
+            if not isinstance(model_ref, str):
+                continue
+            localized_ref = self._localize_auxiliary_model_ref(model_dir, model_ref)
+            if localized_ref != model_ref:
+                localized_model_refs[model_name] = localized_ref
+                localized_any = True
+
+        if localized_any:
+            args["models"] = localized_model_refs
+
+        localized_config = model_dir / _TEXT_PIPELINE_CONFIG_FILE
+        localized_payload = json.dumps(config, indent=4, ensure_ascii=False) + "\n"
+        if not localized_config.exists() or localized_config.read_text(encoding="utf-8") != localized_payload:
+            localized_config.write_text(localized_payload, encoding="utf-8")
+        return localized_config
+
+    def _localize_auxiliary_model_ref(self, owner_dir: Path, model_ref: str) -> str:
+        if "/" not in model_ref:
+            return model_ref
+
+        ref_parts = model_ref.split("/")
+        if len(ref_parts) < 3:
+            return model_ref
+
+        repo_id = "/".join(ref_parts[:2])
+        relative_model_path = "/".join(ref_parts[2:])
+        if not relative_model_path:
+            return model_ref
+
+        from huggingface_hub import hf_hub_download
+
+        local_base = owner_dir / _TEXT_AUX_WEIGHTS_DIR / ref_parts[0] / ref_parts[1] / relative_model_path
+        local_base.parent.mkdir(parents=True, exist_ok=True)
+        for suffix in (".json", ".safetensors"):
+            localized_file = local_base.with_suffix(suffix)
+            if localized_file.exists():
+                continue
+            downloaded_file = Path(hf_hub_download(repo_id, f"{relative_model_path}{suffix}"))
+            shutil.copy2(downloaded_file, localized_file)
+
+        return local_base.relative_to(owner_dir).as_posix()
+
+    def _normalize_prompt(self, params: dict[str, Any]) -> str:
+        prompt = params.get("prompt")
+        if isinstance(prompt, str) and prompt.strip():
+            return prompt.strip()
+
+        for fallback_key in ("text", "input_text"):
+            fallback_prompt = params.get(fallback_key)
+            if isinstance(fallback_prompt, str) and fallback_prompt.strip():
+                return fallback_prompt.strip()
+
+        raise RuntimeError(
+            "[Trellis2Generator] The 'text-to-mesh' capability requires params.prompt to contain a non-empty text prompt."
+        )
 
     def _resolve_mesh_path(self, params: dict) -> Path:
         mesh_path = params.get("mesh_path")
@@ -567,6 +776,56 @@ class Trellis2Generator(BaseGenerator):
         output_path = self._next_output_path()
         self._report(progress_cb, 95, "Exporting textured GLB...")
         textured_mesh.export(str(output_path), file_type="glb")
+        self._report(progress_cb, 100, "Done")
+        return output_path
+
+    def _generate_text_to_mesh(
+        self,
+        params: dict,
+        progress_cb: Optional[Callable[[int, str], None]] = None,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> Path:
+        from trellis.utils import postprocessing_utils
+
+        prompt = self._normalize_prompt(params)
+        sparse_steps = int(params.get("sparse_steps", 12))
+        slat_steps = int(params.get("slat_steps", 12))
+        sparse_cfg = float(params.get("sparse_cfg", 7.5))
+        slat_cfg = float(params.get("slat_cfg", 7.5))
+        texture_size = int(params.get("texture_size", 1024))
+        simplify = float(params.get("simplify", 0.95))
+        seed = int(params.get("seed", 42))
+
+        self._report(progress_cb, 5, "Validating prompt...")
+        self._check_cancelled(cancel_event)
+
+        self._report(progress_cb, 10, "Generating native TRELLIS text mesh...")
+        outputs = self._run_with_smoothed_progress(
+            progress_cb,
+            start=10,
+            end=88,
+            label="Generating native TRELLIS text mesh...",
+            run=lambda: self._model.run(
+                prompt,
+                seed=seed,
+                sparse_structure_sampler_params={"steps": sparse_steps, "cfg_strength": sparse_cfg},
+                slat_sampler_params={"steps": slat_steps, "cfg_strength": slat_cfg},
+                formats=["mesh", "gaussian"],
+            ),
+        )
+        self._check_cancelled(cancel_event)
+
+        self._report(progress_cb, 92, "Baking textures & exporting GLB...")
+        glb = postprocessing_utils.to_glb(
+            outputs["gaussian"][0],
+            outputs["mesh"][0],
+            simplify=simplify,
+            texture_size=texture_size,
+            verbose=False,
+        )
+
+        output_path = self._next_output_path()
+        glb.export(str(output_path))
         self._report(progress_cb, 100, "Done")
         return output_path
 

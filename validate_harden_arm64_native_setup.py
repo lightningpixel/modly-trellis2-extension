@@ -404,6 +404,10 @@ def test_python_runtime_dependency_contract() -> None:
     setup = load_module("modly_setup_validation_runtime_deps", "setup.py")
     assert_true("kornia" in setup.PYTHON_RUNTIME_DEPENDENCIES, "Clean install contract must include kornia")
     assert_true("timm" in setup.PYTHON_RUNTIME_DEPENDENCIES, "Clean install contract must include timm")
+    assert_true("xatlas" in setup.PYTHON_RUNTIME_DEPENDENCIES, "Native text postprocessing must include xatlas")
+    assert_true("pyvista" in setup.PYTHON_RUNTIME_DEPENDENCIES, "Native text postprocessing must include pyvista")
+    assert_true("pymeshfix" in setup.PYTHON_RUNTIME_DEPENDENCIES, "Native text postprocessing must include pymeshfix")
+    assert_true("igraph" in setup.PYTHON_RUNTIME_DEPENDENCIES, "Native text postprocessing must include igraph")
 
     captured = []
 
@@ -641,10 +645,10 @@ def test_vendor_precedence_guards() -> None:
                 raise AssertionError("nvdiffrast should not be allowed to resolve from vendor/")
 
 
-def test_phase1_manifest_and_docs_contract() -> None:
+def test_phase3_manifest_and_docs_contract() -> None:
     manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
     nodes = {node["id"]: node for node in manifest.get("nodes", [])}
-    assert_true(set(nodes) == {"generate", "texture-mesh"}, "Phase 2 must expose both generate and texture-mesh nodes")
+    assert_true(set(nodes) == {"generate", "texture-mesh", "text-to-mesh"}, "Phase 3 must expose generate, texture-mesh, and text-to-mesh nodes")
 
     image_node = nodes["generate"]
     assert_true(image_node["id"] == "generate", "Phase 2 must preserve the working node id 'generate'")
@@ -665,17 +669,28 @@ def test_phase1_manifest_and_docs_contract() -> None:
         {"name": "mesh", "label": "Source Mesh", "type": "mesh", "required": True},
     ], "Texture node inputs must use current Modly named-port manifest format")
 
+    text_node = nodes["text-to-mesh"]
+    assert_true(text_node.get("capability_id") == "text-to-mesh", "Manifest must label the native text node correctly")
+    assert_true(text_node.get("weight_owner_id") == "text-xlarge", "Native text node must use a dedicated text weight owner")
+    assert_true(text_node.get("hf_repo") == "microsoft/TRELLIS-text-xlarge", "Native text node must target the official upstream text repo")
+    assert_true(text_node.get("input") == "text" and text_node.get("output") == "mesh", "Native text node contract must remain text -> mesh")
+    assert_true(text_node.get("download_check") == "pipeline.json", "Native text node must download-check pipeline.json")
+
     with stubbed_generator_imports():
         generator = load_module("modly_generator_phase2_validation", "generator.py")
         assert_true(image_node.get("params_schema") == generator.IMAGE_TO_MESH_PARAMS_SCHEMA, "Manifest params_schema must stay aligned with generator image-to-mesh schema")
         assert_true(texture_node.get("params_schema") == generator.TEXTURE_MESH_PARAMS_SCHEMA, "Manifest params_schema must stay aligned with generator texture-mesh schema")
+        assert_true(text_node.get("params_schema") == generator.TEXT_TO_MESH_PARAMS_SCHEMA, "Manifest params_schema must stay aligned with generator text-to-mesh schema")
         assert_true(generator.CAPABILITIES["generate"].capability_id == "image-to-mesh", "Generator capability map must resolve 'generate' to image-to-mesh")
         assert_true(generator.CAPABILITIES["texture-mesh"].capability_id == "texture-mesh", "Generator capability map must resolve 'texture-mesh' correctly")
+        assert_true(generator.CAPABILITIES["text-to-mesh"].capability_id == "text-to-mesh", "Generator capability map must resolve 'text-to-mesh' correctly")
         assert_true(generator.CAPABILITIES["generate"].config_file == "pipeline.json", "Image capability must keep the default pipeline config")
         assert_true(generator.CAPABILITIES["texture-mesh"].config_file == "texturing_pipeline.json", "Texture capability must point at the texturing pipeline config")
         assert_true(generator.CAPABILITIES["texture-mesh"].download_check == "texturing_pipeline.json", "Texture capability download check must match the texturing pipeline config")
+        assert_true(generator.CAPABILITIES["text-to-mesh"].family == "trellis-text", "Native text node must resolve to the official trellis family")
         assert_true(generator.Trellis2Generator.params_schema() == generator.IMAGE_TO_MESH_PARAMS_SCHEMA, "Default params_schema must preserve Phase 1 compatibility")
         assert_true(generator.Trellis2Generator.capability_params_schema("texture-mesh") == generator.TEXTURE_MESH_PARAMS_SCHEMA, "Capability-specific params_schema lookup must support texture-mesh")
+        assert_true(generator.Trellis2Generator.capability_params_schema("text-to-mesh") == generator.TEXT_TO_MESH_PARAMS_SCHEMA, "Capability-specific params_schema lookup must support text-to-mesh")
 
 
 def test_capability_specific_pipeline_loading() -> None:
@@ -699,13 +714,14 @@ def test_capability_specific_pipeline_loading() -> None:
                 loaded.append((model_dir, config_file))
                 return FakePipeline(self.capability_id)
 
-        for node_id, expected_config in (("generate", "pipeline.json"), ("texture-mesh", "texturing_pipeline.json")):
+        for node_id, expected_config in (("generate", "pipeline.json"), ("texture-mesh", "texturing_pipeline.json"), ("text-to-mesh", generator._TEXT_PIPELINE_CONFIG_FILE)):
             instance = generator.Trellis2Generator.__new__(generator.Trellis2Generator)
             instance._model = None
             instance.model_dir = ROOT / node_id
             instance._auto_download = lambda: (_ for _ in ()).throw(AssertionError("auto-download should not run during config load validation"))
             instance._setup_env = lambda: None
             instance._setup_vendor = lambda: None
+            instance._prepare_text_pipeline_config = lambda _model_dir, generator=generator: Path(_model_dir) / generator._TEXT_PIPELINE_CONFIG_FILE
             capability = generator.CAPABILITIES[node_id]
             instance._capability = lambda capability=capability: capability
             instance._resolve_pipeline_class = lambda capability, node_id=node_id: FakePipelineClass(node_id)
@@ -719,12 +735,55 @@ def test_capability_specific_pipeline_loading() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert_true("trellis-2/generate" in readme, "README must document the currently supported node")
     assert_true("trellis-2/texture-mesh" in readme, "README must document the texture-mesh node")
+    assert_true("trellis-2/text-to-mesh" in readme, "README must document the text-to-mesh node")
     assert_true("image + mesh -> mesh" in readme, "README must document the texture-mesh workflow shape")
-    assert_true("text-to-image -> trellis-2/generate" in readme, "README must document the workflow recommendation for prompt-first UX")
-    assert_true("https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m" in readme, "README must include the gated DINOv3 dependency link")
-    assert_true("https://huggingface.co/briaai/RMBG-2.0" in readme, "README must include the gated RMBG dependency link")
-    assert_true("No native TRELLIS text-to-mesh node is exposed" in readme, "README must explicitly deny native TRELLIS text-to-mesh support for Phase 1")
+    assert_true("text -> mesh" in readme, "README must document the native text workflow shape")
+    assert_true("params.prompt" in readme, "README must document the canonical text prompt transport assumption")
+    assert_true("microsoft/TRELLIS-text-xlarge" in readme, "README must document the official text model repo")
     assert_true("24 GB VRAM" in readme, "README must describe practical VRAM expectations")
+
+
+def test_capability_resolution_prefers_explicit_runtime_node_and_rejects_ambiguous_download_check() -> None:
+    with stubbed_generator_imports():
+        generator = load_module("modly_generator_capability_resolution_validation", "generator.py")
+
+        env_name = "MODEL_ID"
+        with patched_env(env_name, "trellis-2/text-to-mesh"):
+            instance = generator.Trellis2Generator.__new__(generator.Trellis2Generator)
+            instance.model_dir = Path("/tmp/trellis-2/text-xlarge")
+            instance.download_check = "pipeline.json"
+            assert_true(
+                instance._capability() == generator.CAPABILITIES["text-to-mesh"],
+                "Capability resolution must prefer explicit runtime node ids over owner directory names",
+            )
+
+        explicit_attr_instance = generator.Trellis2Generator.__new__(generator.Trellis2Generator)
+        explicit_attr_instance.node_id = "texture-mesh"
+        explicit_attr_instance.model_dir = Path("/tmp/trellis-2/base-4b")
+        explicit_attr_instance.download_check = "texturing_pipeline.json"
+        assert_true(
+            explicit_attr_instance._capability() == generator.CAPABILITIES["texture-mesh"],
+            "Capability resolution must honor an explicitly injected node_id attribute when present",
+        )
+
+        fallback_instance = generator.Trellis2Generator.__new__(generator.Trellis2Generator)
+        fallback_instance.model_dir = Path("/tmp/trellis-2/unknown-owner")
+        fallback_instance.download_check = "texturing_pipeline.json"
+        assert_true(
+            fallback_instance._capability() == generator.CAPABILITIES["texture-mesh"],
+            "Unique download_check values may still resolve capabilities as a fallback",
+        )
+
+        ambiguous_instance = generator.Trellis2Generator.__new__(generator.Trellis2Generator)
+        ambiguous_instance.model_dir = Path("/tmp/trellis-2/text-xlarge")
+        ambiguous_instance.download_check = "pipeline.json"
+        with patched_env(env_name, None):
+            try:
+                ambiguous_instance._capability()
+            except RuntimeError as exc:
+                assert_true("Ambiguous capability resolution" in str(exc), "Ambiguous download_check fallback must fail loudly")
+            else:
+                raise AssertionError("Ambiguous download_check fallback should not silently choose the wrong capability")
 
 
 def test_texture_mesh_generator_dispatch_and_validation() -> None:
@@ -840,6 +899,140 @@ def test_texture_mesh_generator_dispatch_and_validation() -> None:
             assert_true(exported_paths == [(str(output_path), "glb")], "Texture generation must export the resulting textured mesh as GLB")
 
 
+def test_text_mesh_generator_dispatch_and_aux_localization() -> None:
+    with stubbed_generator_imports():
+        generator = load_module("modly_generator_text_dispatch_validation", "generator.py")
+
+        dispatch_instance = generator.Trellis2Generator.__new__(generator.Trellis2Generator)
+        dispatch_instance._generate_image_to_mesh = lambda *args, **kwargs: "image-path"
+        dispatch_instance._generate_texture_mesh = lambda *args, **kwargs: "texture-path"
+        dispatch_instance._generate_text_to_mesh = lambda *args, **kwargs: "text-path"
+
+        dispatch_instance._capability = lambda: generator.CAPABILITIES["text-to-mesh"]
+        assert_true(
+            dispatch_instance.generate(b"", {"prompt": "chair"}, None, None) == "text-path",
+            "Text node dispatch must route to text-to-mesh implementation",
+        )
+
+        prompt_instance = generator.Trellis2Generator.__new__(generator.Trellis2Generator)
+        assert_true(prompt_instance._normalize_prompt({"prompt": "  chair  "}) == "chair", "Prompt normalization must prefer params.prompt")
+        assert_true(prompt_instance._normalize_prompt({"text": "lamp"}) == "lamp", "Prompt normalization may fall back to params.text")
+
+        try:
+            prompt_instance._normalize_prompt({})
+        except RuntimeError as exc:
+            assert_true("requires params.prompt" in str(exc), "Missing prompt must raise a clear text validation error")
+        else:
+            raise AssertionError("Missing prompt should fail validation")
+
+        with tempfile.TemporaryDirectory(prefix="trellis2-text-localize-") as tmp:
+            model_dir = Path(tmp)
+            (model_dir / "pipeline.json").write_text(json.dumps({
+                "name": "TrellisTextTo3DPipeline",
+                "args": {
+                    "models": {
+                        "sparse_structure_decoder": "JeffreyXiang/TRELLIS-image-large/ckpts/ss_dec_conv3d_16l8_fp16",
+                        "slat_decoder_mesh": "JeffreyXiang/TRELLIS-image-large/ckpts/slat_dec_mesh_swin8_B_64l8m256c_fp16",
+                        "slat_flow_model": "ckpts/slat_flow_txt_dit_XL_64l8p2_fp16",
+                    }
+                },
+            }, indent=2), encoding="utf-8")
+
+            downloads: list[tuple[str, str]] = []
+            fake_hf_root = model_dir / "fake-hf"
+
+            def fake_hf_hub_download(repo_id: str, filename: str) -> str:
+                downloads.append((repo_id, filename))
+                target = fake_hf_root / repo_id.replace("/", "--") / filename
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(f"stub:{repo_id}:{filename}", encoding="utf-8")
+                return str(target)
+
+            fake_hf_module = types.ModuleType("huggingface_hub")
+            fake_hf_module.hf_hub_download = fake_hf_hub_download
+            original_hf_module = sys.modules.get("huggingface_hub")
+            sys.modules["huggingface_hub"] = fake_hf_module
+            try:
+                localized_config = prompt_instance._prepare_text_pipeline_config(model_dir)
+            finally:
+                if original_hf_module is None:
+                    sys.modules.pop("huggingface_hub", None)
+                else:
+                    sys.modules["huggingface_hub"] = original_hf_module
+
+            localized_payload = json.loads(localized_config.read_text(encoding="utf-8"))
+            localized_models = localized_payload["args"]["models"]
+            assert_true(localized_config.name == generator._TEXT_PIPELINE_CONFIG_FILE, "Text pipeline localization must emit the dedicated localized config file")
+            assert_true(localized_models["sparse_structure_decoder"].startswith(f"{generator._TEXT_AUX_WEIGHTS_DIR}/JeffreyXiang/TRELLIS-image-large/ckpts/"), "Auxiliary decoders must be rewritten under the text owner path")
+            assert_true(localized_models["slat_decoder_mesh"].startswith(f"{generator._TEXT_AUX_WEIGHTS_DIR}/JeffreyXiang/TRELLIS-image-large/ckpts/"), "Mesh decoder must also be localized under the text owner path")
+            assert_true(localized_models["slat_flow_model"] == "ckpts/slat_flow_txt_dit_XL_64l8p2_fp16", "Local in-owner checkpoints must not be rewritten")
+            assert_true(
+                downloads == [
+                    ("JeffreyXiang/TRELLIS-image-large", "ckpts/ss_dec_conv3d_16l8_fp16.json"),
+                    ("JeffreyXiang/TRELLIS-image-large", "ckpts/ss_dec_conv3d_16l8_fp16.safetensors"),
+                    ("JeffreyXiang/TRELLIS-image-large", "ckpts/slat_dec_mesh_swin8_B_64l8m256c_fp16.json"),
+                    ("JeffreyXiang/TRELLIS-image-large", "ckpts/slat_dec_mesh_swin8_B_64l8m256c_fp16.safetensors"),
+                ],
+                "Auxiliary localization must deterministically hydrate each referenced external checkpoint",
+            )
+
+        fake_postprocessing_utils = types.ModuleType("trellis.utils.postprocessing_utils")
+        glb_exports: list[str] = []
+        to_glb_calls: list[dict[str, object]] = []
+
+        class FakeGlb:
+            def export(self, path: str):
+                glb_exports.append(path)
+
+        fake_postprocessing_utils.to_glb = lambda gaussian, mesh, **kwargs: to_glb_calls.append({"gaussian": gaussian, "mesh": mesh, **kwargs}) or FakeGlb()
+        fake_utils_module = types.ModuleType("trellis.utils")
+        fake_utils_module.postprocessing_utils = fake_postprocessing_utils
+        fake_trellis_module = types.ModuleType("trellis")
+        fake_trellis_module.utils = fake_utils_module
+
+        original_trellis = sys.modules.get("trellis")
+        original_trellis_utils = sys.modules.get("trellis.utils")
+        original_trellis_post = sys.modules.get("trellis.utils.postprocessing_utils")
+        sys.modules["trellis"] = fake_trellis_module
+        sys.modules["trellis.utils"] = fake_utils_module
+        sys.modules["trellis.utils.postprocessing_utils"] = fake_postprocessing_utils
+        try:
+            with tempfile.TemporaryDirectory(prefix="trellis2-text-runtime-") as tmp:
+                runtime_instance = generator.Trellis2Generator.__new__(generator.Trellis2Generator)
+                runtime_instance._model = types.SimpleNamespace(
+                    run=lambda prompt, **kwargs: {"gaussian": ["gaussian-out"], "mesh": ["mesh-out"], "prompt": prompt, "kwargs": kwargs}
+                )
+                runtime_instance.outputs_dir = Path(tmp) / "outputs"
+                runtime_instance._report = lambda *_args, **_kwargs: None
+                runtime_instance._check_cancelled = lambda *_args, **_kwargs: None
+                runtime_instance._run_with_smoothed_progress = lambda _progress_cb, **kwargs: kwargs["run"]()
+
+                output_path = runtime_instance._generate_text_to_mesh(
+                    {
+                        "prompt": "A wooden chair",
+                        "sparse_steps": 11,
+                        "slat_steps": 13,
+                        "sparse_cfg": 6.5,
+                        "slat_cfg": 8.0,
+                        "texture_size": 2048,
+                        "simplify": 0.9,
+                        "seed": 123,
+                    }
+                )
+        finally:
+            for name, module in (("trellis", original_trellis), ("trellis.utils", original_trellis_utils), ("trellis.utils.postprocessing_utils", original_trellis_post)):
+                if module is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = module
+
+        assert_true(to_glb_calls[0]["gaussian"] == "gaussian-out", "Text generation must pass the official gaussian output into TRELLIS postprocessing")
+        assert_true(to_glb_calls[0]["mesh"] == "mesh-out", "Text generation must pass the official mesh output into TRELLIS postprocessing")
+        assert_true(to_glb_calls[0]["simplify"] == 0.9, "Text generation must forward simplify to official postprocessing")
+        assert_true(to_glb_calls[0]["texture_size"] == 2048, "Text generation must forward texture_size to official postprocessing")
+        assert_true(glb_exports == [str(output_path)], "Text generation must export the official postprocessed GLB")
+
+
 def test_dinov3_transformers_compatibility_patch() -> None:
     with stubbed_image_feature_extractor_imports() as fake_tensor:
         module = load_module(
@@ -908,9 +1101,10 @@ def main() -> None:
     test_arm64_spconv_source_build_env()
     test_patch_installed_cumm_cuda_discovery()
     test_vendor_precedence_guards()
-    test_phase1_manifest_and_docs_contract()
+    test_phase3_manifest_and_docs_contract()
     test_capability_specific_pipeline_loading()
     test_texture_mesh_generator_dispatch_and_validation()
+    test_text_mesh_generator_dispatch_and_aux_localization()
     test_dinov3_transformers_compatibility_patch()
     print("validate_harden_arm64_native_setup: OK")
 
