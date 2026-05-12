@@ -251,5 +251,22 @@
         }
       ]
     }
-  ]
+  ],
+  "models": [
+    {
+      "id": "base-4b",
+      "name": "TRELLIS.2-4B",
+      "hf_repo": "microsoft/TRELLIS.2-4B",
+      "download_check": "pipeline.json",
+      "description": "4B-parameter O-Voxel diffusion model for high-fidelity image-to-3D with PBR textures (~24GB VRAM)"
+    },
+    {
+      "id": "text-xlarge",
+      "name": "TRELLIS Text XL",
+      "hf_repo": "microsoft/TRELLIS-text-xlarge",
+      "download_check": "pipeline.json",
+      "description": "Official native TRELLIS text-to-mesh model weights."
+    }
+  ],
+  "signature": "BYa3IuqxLgLlMG/mw7x/Un2kLa05qt3e2DrXSoemCMkpB00pMPrIZEp1/A+bMeh1WCkLhUYtWoq2eZufwGK4DQ=="
 }
