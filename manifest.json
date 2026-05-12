@@ -2,7 +2,7 @@
   "id": "trellis-2",
   "name": "TRELLIS.2",
   "type": "model",
-  "source": "https://github.com/DrHepa/modly-trellis2-extension",
+  "source": "https://github.com/microsoft/TRELLIS.2",
   "description": "TRELLIS extension for Modly with production-safe TRELLIS.2 image/texturing nodes plus native official TRELLIS text-to-mesh.",
   "version": "1.0.0",
   "author": "Lightning Pixel",
