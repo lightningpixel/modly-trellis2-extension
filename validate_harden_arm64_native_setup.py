@@ -10,6 +10,8 @@ import types
 from contextlib import contextmanager
 from pathlib import Path
 
+import numpy as np
+
 
 ROOT = Path(__file__).resolve().parent
 
@@ -897,6 +899,113 @@ def test_texture_mesh_generator_dispatch_and_validation() -> None:
             assert_true(model_calls[0]["seed"] == 7, "Texture generation must forward seed")
             assert_true(model_calls[0]["tex_slat_sampler_params"] == {"steps": 9}, "Texture generation must forward tex_steps to TRELLIS sampler params")
             assert_true(exported_paths == [(str(output_path), "glb")], "Texture generation must export the resulting textured mesh as GLB")
+
+
+def test_image_mesh_debug_artifact_tracks_topology_stages() -> None:
+    with stubbed_generator_imports():
+        generator = load_module("modly_generator_image_debug_validation", "generator.py")
+
+        fake_trimesh = types.ModuleType("trimesh")
+
+        class FakeTrimesh:
+            def __init__(self, vertices=None, faces=None, process=False, **_kwargs):
+                self.vertices = np.asarray(vertices if vertices is not None else np.zeros((0, 3), dtype=np.float32))
+                self.faces = np.asarray(faces if faces is not None else np.zeros((0, 3), dtype=np.int32))
+                self.process = process
+                self.is_watertight = len(self.faces) > 0
+
+            def split(self, only_watertight=False):
+                if len(self.faces) == 0:
+                    return []
+                half = max(1, len(self.faces) // 2)
+                return [
+                    FakeTrimesh(self.vertices[: max(3, len(self.vertices) // 2)], self.faces[:half], process=False),
+                    FakeTrimesh(self.vertices[: max(3, len(self.vertices) // 3)], self.faces[half:], process=False),
+                ]
+
+            def export(self, path: str, extension_webp: bool = True, file_type: str | None = None):
+                Path(path).write_bytes(b"glb")
+
+        fake_trimesh.Trimesh = FakeTrimesh
+        fake_trimesh.Scene = type("FakeScene", (), {})
+        fake_trimesh.util = types.SimpleNamespace(concatenate=lambda geometries: geometries[0])
+        fake_trimesh.load = lambda _path, force=None, process=False: FakeTrimesh(
+            vertices=np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32),
+            faces=np.array([[0, 1, 2]], dtype=np.int32),
+            process=process,
+        )
+
+        fake_o_voxel = types.ModuleType("o_voxel")
+        fake_o_voxel.postprocess = types.SimpleNamespace(
+            to_glb=lambda **_kwargs: FakeTrimesh(
+                vertices=np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32),
+                faces=np.array([[0, 1, 2]], dtype=np.int32),
+                process=False,
+            )
+        )
+
+        original_trimesh = sys.modules.get("trimesh")
+        original_o_voxel = sys.modules.get("o_voxel")
+        sys.modules["trimesh"] = fake_trimesh
+        sys.modules["o_voxel"] = fake_o_voxel
+        try:
+            with tempfile.TemporaryDirectory(prefix="trellis2-image-debug-") as tmp:
+                runtime_instance = generator.Trellis2Generator.__new__(generator.Trellis2Generator)
+                runtime_instance._model = types.SimpleNamespace(
+                    run=lambda *_args, **_kwargs: [types.SimpleNamespace(
+                        vertices=np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float32),
+                        faces=np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int32),
+                        attrs="attrs",
+                        coords="coords",
+                        layout="layout",
+                        voxel_size=1.0,
+                        simplify=lambda _target: None,
+                    )]
+                )
+                runtime_instance.outputs_dir = Path(tmp) / "outputs"
+                runtime_instance._report = lambda *_args, **_kwargs: None
+                runtime_instance._check_cancelled = lambda *_args, **_kwargs: None
+                runtime_instance._load_image = lambda _bytes: "decoded-image"
+                runtime_instance._run_with_smoothed_progress = lambda _progress_cb, **kwargs: kwargs["run"]()
+
+                output_path = runtime_instance._generate_image_to_mesh(
+                    b"image-bytes",
+                    {
+                        "pipeline_type": "512",
+                        "sparse_steps": 6,
+                        "shape_steps": 7,
+                        "tex_steps": 8,
+                        "faces": 111,
+                        "texture_size": 2048,
+                        "seed": 9,
+                    },
+                )
+
+                debug_payload = json.loads(output_path.with_suffix(".debug.json").read_text(encoding="utf-8"))
+        finally:
+            if original_trimesh is None:
+                sys.modules.pop("trimesh", None)
+            else:
+                sys.modules["trimesh"] = original_trimesh
+            if original_o_voxel is None:
+                sys.modules.pop("o_voxel", None)
+            else:
+                sys.modules["o_voxel"] = original_o_voxel
+
+        assert_true(debug_payload["capability"] == "image-to-mesh", "Image debug artifact must identify the image-to-mesh capability")
+        assert_true(debug_payload["output_glb"] == str(output_path), "Image debug artifact must record the output GLB path")
+        assert_true(
+            [stage["stage"] for stage in debug_payload["stages"]] == [
+                "before_simplify",
+                "after_simplify",
+                "before_final_to_glb",
+                "after_postprocess_to_glb",
+                "reloaded_exported_glb",
+            ],
+            "Image debug artifact must capture every topology checkpoint in order",
+        )
+        assert_true(debug_payload["stages"][0]["component_count"] == 2, "Topology diagnostics must capture connected-component counts")
+        assert_true(debug_payload["stages"][-1]["face_count"] == 1, "Reloaded GLB diagnostics must reflect the exported mesh")
 
 
 def test_text_mesh_generator_dispatch_and_aux_localization() -> None:

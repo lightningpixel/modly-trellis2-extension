@@ -36,6 +36,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+import numpy as np
+
 from PIL import Image
 
 from services.generators.base import BaseGenerator, smooth_progress, GenerationCancelled
@@ -43,6 +45,9 @@ from services.generators.base import BaseGenerator, smooth_progress, GenerationC
 _EXTENSION_DIR = Path(__file__).parent
 _VENDOR_DIR    = _EXTENSION_DIR / "vendor"
 _OPTIONAL_NVDIFFREC_ENV = "MODLY_TRELLIS2_INSTALL_NVDIFFREC"
+_DEBUG_REMESH_ENV = "MODLY_TRELLIS2_DEBUG_REMESH"
+_DEBUG_REMESH_PROJECT_ENV = "MODLY_TRELLIS2_DEBUG_REMESH_PROJECT"
+_DEBUG_LABEL_ENV = "MODLY_TRELLIS2_DEBUG_LABEL"
 _NATIVE_VENDOR_OVERLAPS = {"nvdiffrast"}
 _TEXT_PIPELINE_CONFIG_FILE = "pipeline.text-localized.json"
 _TEXT_AUX_WEIGHTS_DIR = "localized-aux-weights"
@@ -312,6 +317,31 @@ def filtered_vendor_paths() -> list[str]:
 def module_spec_origin(module_name: str) -> str | None:
     spec = importlib.util.find_spec(module_name)
     return getattr(spec, "origin", None) if spec is not None else None
+
+
+def _parse_optional_bool(value: str | None) -> bool | None:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise RuntimeError(
+        f"[Trellis2Generator] Invalid boolean value '{value}' for debug override. "
+        "Expected one of: 1/0, true/false, yes/no, on/off."
+    )
+
+
+def _parse_optional_float(value: str | None) -> float | None:
+    if value is None or not value.strip():
+        return None
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"[Trellis2Generator] Invalid float value '{value}' for debug override."
+        ) from exc
 
 
 class Trellis2Generator(BaseGenerator):
@@ -652,6 +682,104 @@ class Trellis2Generator(BaseGenerator):
 
         return mesh
 
+    def _ensure_numpy_array(self, value: Any) -> np.ndarray:
+        if hasattr(value, "detach"):
+            value = value.detach()
+        if hasattr(value, "cpu"):
+            value = value.cpu()
+        if hasattr(value, "numpy"):
+            value = value.numpy()
+        return np.asarray(value)
+
+    def _topology_diagnostics_from_arrays(self, *, stage: str, vertices: Any, faces: Any) -> dict[str, Any]:
+        import trimesh
+
+        vertices_np = self._ensure_numpy_array(vertices)
+        faces_np = self._ensure_numpy_array(faces)
+        diagnostics: dict[str, Any] = {
+            "stage": stage,
+            "vertex_count": int(len(vertices_np)),
+            "face_count": int(len(faces_np)),
+        }
+
+        if len(vertices_np) == 0 or len(faces_np) == 0:
+            diagnostics.update({
+                "component_count": 0,
+                "largest_component_face_count": 0,
+                "largest_component_vertex_count": 0,
+                "watertight": False,
+            })
+            return diagnostics
+
+        tri_mesh = trimesh.Trimesh(vertices=vertices_np, faces=faces_np, process=False)
+        components = tri_mesh.split(only_watertight=False)
+        largest = max(components, key=lambda component: len(component.faces), default=None)
+        diagnostics.update({
+            "component_count": int(len(components)),
+            "largest_component_face_count": int(len(largest.faces)) if largest is not None else 0,
+            "largest_component_vertex_count": int(len(largest.vertices)) if largest is not None else 0,
+            "watertight": bool(tri_mesh.is_watertight),
+        })
+        return diagnostics
+
+    def _topology_diagnostics_from_mesh(self, *, stage: str, mesh: Any) -> dict[str, Any]:
+        return self._topology_diagnostics_from_arrays(stage=stage, vertices=mesh.vertices, faces=mesh.faces)
+
+    def _write_image_to_mesh_debug_artifact(
+        self,
+        debug_path: Path,
+        *,
+        output_path: Path,
+        params: dict[str, Any],
+        final_to_glb: dict[str, Any],
+        stages: list[dict[str, Any]],
+        status: str = "ok",
+        error: dict[str, Any] | None = None,
+    ) -> None:
+        debug_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "generator": self.__class__.__name__,
+            "capability": "image-to-mesh",
+            "output_glb": str(output_path),
+            "params": {
+                "pipeline_type": params.get("pipeline_type", "1024_cascade"),
+                "sparse_steps": int(params.get("sparse_steps", 12)),
+                "shape_steps": int(params.get("shape_steps", 12)),
+                "tex_steps": int(params.get("tex_steps", 12)),
+                "faces": int(params.get("faces", -1)),
+                "texture_size": int(params.get("texture_size", 4096)),
+                "seed": int(params.get("seed", 42)),
+            },
+            "debug_label": os.environ.get(_DEBUG_LABEL_ENV, "").strip() or None,
+            "final_to_glb": final_to_glb,
+            "status": status,
+            "error": error,
+            "stages": stages,
+        }
+        debug_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def _resolve_image_to_mesh_postprocess_debug(self) -> dict[str, Any]:
+        remesh_override = _parse_optional_bool(os.environ.get(_DEBUG_REMESH_ENV))
+        remesh_project_override = _parse_optional_float(os.environ.get(_DEBUG_REMESH_PROJECT_ENV))
+        return {
+            "remesh": False if remesh_override is None else remesh_override,
+            "remesh_band": 1,
+            "remesh_project": 0.9 if remesh_project_override is None else remesh_project_override,
+            "overrides": {
+                "remesh": remesh_override,
+                "remesh_project": remesh_project_override,
+            },
+        }
+
+    def _load_exported_mesh_diagnostics(self, *, stage: str, output_path: Path) -> dict[str, Any]:
+        import trimesh
+
+        exported_mesh = trimesh.load(str(output_path), force="mesh", process=False)
+        if isinstance(exported_mesh, trimesh.Scene):
+            geometries = [geometry for geometry in exported_mesh.geometry.values() if isinstance(geometry, trimesh.Trimesh)]
+            exported_mesh = trimesh.util.concatenate(geometries) if geometries else trimesh.Trimesh()
+        return self._topology_diagnostics_from_mesh(stage=stage, mesh=exported_mesh)
+
     def _generate_image_to_mesh(
         self,
         image_bytes: bytes,
@@ -669,36 +797,55 @@ class Trellis2Generator(BaseGenerator):
         faces         = int(params.get("faces", -1))
         texture_size  = int(params.get("texture_size", 4096))
         target_faces  = faces if faces > 0 else 1_000_000
+        output_path   = self._next_output_path()
+        debug_path    = output_path.with_suffix(".debug.json")
+        debug_stages: list[dict[str, Any]] = []
+        final_to_glb = self._resolve_image_to_mesh_postprocess_debug()
 
         self._report(progress_cb, 5, "Loading image...")
         image = self._load_image(image_bytes)
         self._check_cancelled(cancel_event)
 
         self._report(progress_cb, 10, "Generating 3D structure...")
-        outputs = self._run_with_smoothed_progress(
-            progress_cb,
-            start=10,
-            end=85,
-            label="Generating 3D structure...",
-            run=lambda: self._model.run(
-                image,
-                seed=seed,
-                preprocess_image=True,
-                pipeline_type=pipeline_type,
-                sparse_structure_sampler_params={"steps": sparse_steps},
-                shape_slat_sampler_params={"steps": shape_steps},
-                tex_slat_sampler_params={"steps": tex_steps},
-            ),
-        )
+        try:
+            outputs = self._run_with_smoothed_progress(
+                progress_cb,
+                start=10,
+                end=85,
+                label="Generating 3D structure...",
+                run=lambda: self._model.run(
+                    image,
+                    seed=seed,
+                    preprocess_image=True,
+                    pipeline_type=pipeline_type,
+                    sparse_structure_sampler_params={"steps": sparse_steps},
+                    shape_slat_sampler_params={"steps": shape_steps},
+                    tex_slat_sampler_params={"steps": tex_steps},
+                ),
+            )
+        except Exception as exc:
+            self._write_image_to_mesh_debug_artifact(
+                debug_path,
+                output_path=output_path,
+                params=params,
+                final_to_glb=final_to_glb,
+                stages=debug_stages,
+                status="failed",
+                error={"stage": "model.run", "type": type(exc).__name__, "message": str(exc)},
+            )
+            raise
         self._check_cancelled(cancel_event)
 
         self._report(progress_cb, 87, "Simplifying mesh...")
         mesh = outputs[0]
+        debug_stages.append(self._topology_diagnostics_from_mesh(stage="before_simplify", mesh=mesh))
         mesh.simplify(min(target_faces, 16_777_216))
+        debug_stages.append(self._topology_diagnostics_from_mesh(stage="after_simplify", mesh=mesh))
         self._check_cancelled(cancel_event)
 
         self._report(progress_cb, 93, "Baking textures & exporting GLB...")
         try:
+            debug_stages.append(self._topology_diagnostics_from_mesh(stage="before_final_to_glb", mesh=mesh))
             glb = o_voxel.postprocess.to_glb(
                 vertices          = mesh.vertices,
                 faces             = mesh.faces,
@@ -709,9 +856,9 @@ class Trellis2Generator(BaseGenerator):
                 aabb              = [[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
                 decimation_target = target_faces,
                 texture_size      = texture_size,
-                remesh            = True,
-                remesh_band       = 1,
-                remesh_project    = 0,
+                remesh            = final_to_glb["remesh"],
+                remesh_band       = final_to_glb["remesh_band"],
+                remesh_project    = final_to_glb["remesh_project"],
                 verbose           = False,
             )
         except ModuleNotFoundError as exc:
@@ -722,9 +869,41 @@ class Trellis2Generator(BaseGenerator):
                     "if this renderer path is required."
                 ) from exc
             raise
+        except Exception as exc:
+            self._write_image_to_mesh_debug_artifact(
+                debug_path,
+                output_path=output_path,
+                params=params,
+                final_to_glb=final_to_glb,
+                stages=debug_stages,
+                status="failed",
+                error={"stage": "o_voxel.postprocess.to_glb", "type": type(exc).__name__, "message": str(exc)},
+            )
+            raise
 
-        output_path = self._next_output_path()
-        glb.export(str(output_path), extension_webp=True)
+        debug_stages.append(self._topology_diagnostics_from_mesh(stage="after_postprocess_to_glb", mesh=glb))
+
+        try:
+            glb.export(str(output_path), extension_webp=True)
+            debug_stages.append(self._load_exported_mesh_diagnostics(stage="reloaded_exported_glb", output_path=output_path))
+            self._write_image_to_mesh_debug_artifact(
+                debug_path,
+                output_path=output_path,
+                params=params,
+                final_to_glb=final_to_glb,
+                stages=debug_stages,
+            )
+        except Exception as exc:
+            self._write_image_to_mesh_debug_artifact(
+                debug_path,
+                output_path=output_path,
+                params=params,
+                final_to_glb=final_to_glb,
+                stages=debug_stages,
+                status="failed",
+                error={"stage": "glb.export", "type": type(exc).__name__, "message": str(exc)},
+            )
+            raise
         self._report(progress_cb, 100, "Done")
         return output_path
 
