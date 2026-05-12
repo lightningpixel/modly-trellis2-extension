@@ -1,11 +1,11 @@
 {
   "id": "trellis-2",
   "name": "TRELLIS.2",
+  "type": "model",
   "source": "https://github.com/microsoft/TRELLIS.2",
-  "description": "High-fidelity image-to-3D with PBR textures via O-Voxel structured latents. Generates geometry + full PBR material. Requires ~24GB VRAM.",
+  "description": "TRELLIS extension for Modly with production-safe TRELLIS.2 image/texturing nodes plus native official TRELLIS text-to-mesh.",
   "version": "1.0.0",
   "author": "Lightning Pixel",
-  "type": "model",
   "generator_class": "Trellis2Generator",
   "tags": [
     "image-to-3d",
@@ -15,35 +15,25 @@
   ],
   "nodes": [
     {
-      "id": "trellis-2",
-      "name": "TRELLIS.2-4B",
+      "id": "generate",
+      "name": "Image to Mesh",
+      "capability_id": "image-to-mesh",
+      "description": "Generate a textured GLB mesh from one input image using the official TRELLIS.2 image pipeline.",
       "input": "image",
       "output": "mesh",
+      "weight_owner_id": "base-4b",
       "hf_repo": "microsoft/TRELLIS.2-4B",
       "download_check": "pipeline.json",
-      "description": "4B-parameter O-Voxel diffusion model for high-fidelity image-to-3D with PBR textures (~24GB VRAM)",
       "params_schema": [
         {
           "id": "pipeline_type",
           "label": "Resolution",
           "type": "select",
           "options": [
-            {
-              "value": "512",
-              "label": "512³  (~3 s)"
-            },
-            {
-              "value": "1024",
-              "label": "1024³  (~17 s)"
-            },
-            {
-              "value": "1024_cascade",
-              "label": "1024³ Cascade (~17 s)"
-            },
-            {
-              "value": "1536_cascade",
-              "label": "1536³ Cascade (~60 s)"
-            }
+            { "value": "512", "label": "512³  (~3 s)" },
+            { "value": "1024", "label": "1024³  (~17 s)" },
+            { "value": "1024_cascade", "label": "1024³ Cascade (~17 s)" },
+            { "value": "1536_cascade", "label": "1536³ Cascade (~60 s)" }
           ],
           "default": "1024_cascade",
           "tooltip": "Voxel resolution. Higher = more geometry detail but much slower and more VRAM."
@@ -89,21 +79,166 @@
           "label": "Texture Size",
           "type": "select",
           "options": [
-            {
-              "value": 2048,
-              "label": "2048"
-            },
-            {
-              "value": 4096,
-              "label": "4096"
-            },
-            {
-              "value": 8192,
-              "label": "8192"
-            }
+            { "value": 2048, "label": "2048" },
+            { "value": 4096, "label": "4096" },
+            { "value": 8192, "label": "8192" }
           ],
           "default": 4096,
           "tooltip": "Resolution of the baked PBR texture atlas (base color, roughness, metallic)."
+        },
+        {
+          "id": "seed",
+          "label": "Seed",
+          "type": "int",
+          "default": 42,
+          "min": 0,
+          "max": 2147483647,
+          "tooltip": "Seed for reproducibility. Click shuffle for a random seed."
+        }
+      ]
+    },
+    {
+      "id": "texture-mesh",
+      "name": "Texture Mesh",
+      "capability_id": "texture-mesh",
+      "description": "Texture an existing mesh from one reference image using the official TRELLIS.2 texturing pipeline.",
+      "input": "image",
+      "inputs": [
+        {
+          "name": "image",
+          "label": "Reference Image",
+          "type": "image",
+          "required": true
+        },
+        {
+          "name": "mesh",
+          "label": "Source Mesh",
+          "type": "mesh",
+          "required": true
+        }
+      ],
+      "output": "mesh",
+      "weight_owner_id": "base-4b",
+      "hf_repo": "microsoft/TRELLIS.2-4B",
+      "download_check": "texturing_pipeline.json",
+      "params_schema": [
+        {
+          "id": "pipeline_type",
+          "label": "Texture Resolution",
+          "type": "select",
+          "options": [
+            { "value": "512", "label": "512³" },
+            { "value": "1024", "label": "1024³" }
+          ],
+          "default": "1024",
+          "tooltip": "Internal voxel/texturing resolution used by the TRELLIS.2 texturing pipeline. 1024 gives better fidelity but costs more VRAM and time."
+        },
+        {
+          "id": "tex_steps",
+          "label": "Texture SLAT Steps",
+          "type": "int",
+          "default": 12,
+          "min": 1,
+          "max": 50,
+          "tooltip": "Diffusion steps for the texture latent stage. More steps = sharper textures."
+        },
+        {
+          "id": "texture_size",
+          "label": "Texture Size",
+          "type": "select",
+          "options": [
+            { "value": 2048, "label": "2048" },
+            { "value": 4096, "label": "4096" },
+            { "value": 8192, "label": "8192" }
+          ],
+          "default": 4096,
+          "tooltip": "Resolution of the exported texture atlas. Higher values improve detail but increase memory and export time."
+        },
+        {
+          "id": "seed",
+          "label": "Seed",
+          "type": "int",
+          "default": 42,
+          "min": 0,
+          "max": 2147483647,
+          "tooltip": "Seed for reproducibility. Click shuffle for a random seed."
+        }
+      ]
+    },
+    {
+      "id": "text-to-mesh",
+      "name": "Text to Mesh",
+      "capability_id": "text-to-mesh",
+      "description": "Generate a textured GLB mesh from a text prompt using the official native TRELLIS text pipeline.",
+      "input": "text",
+      "output": "mesh",
+      "weight_owner_id": "text-xlarge",
+      "hf_repo": "microsoft/TRELLIS-text-xlarge",
+      "download_check": "pipeline.json",
+      "params_schema": [
+        {
+          "id": "prompt",
+          "label": "Prompt",
+          "type": "text",
+          "default": "",
+          "tooltip": "Text prompt used by the native TRELLIS text-to-mesh pipeline."
+        },
+        {
+          "id": "sparse_steps",
+          "label": "Sparse Structure Steps",
+          "type": "int",
+          "default": 12,
+          "min": 1,
+          "max": 50,
+          "tooltip": "Diffusion steps for the sparse structure stage."
+        },
+        {
+          "id": "slat_steps",
+          "label": "Structured Latent Steps",
+          "type": "int",
+          "default": 12,
+          "min": 1,
+          "max": 50,
+          "tooltip": "Diffusion steps for the structured latent stage."
+        },
+        {
+          "id": "sparse_cfg",
+          "label": "Sparse CFG",
+          "type": "float",
+          "default": 7.5,
+          "min": 0.0,
+          "max": 20.0,
+          "tooltip": "Classifier-free guidance strength for sparse structure generation."
+        },
+        {
+          "id": "slat_cfg",
+          "label": "Structured Latent CFG",
+          "type": "float",
+          "default": 7.5,
+          "min": 0.0,
+          "max": 20.0,
+          "tooltip": "Classifier-free guidance strength for structured latent generation."
+        },
+        {
+          "id": "texture_size",
+          "label": "Texture Size",
+          "type": "select",
+          "options": [
+            { "value": 1024, "label": "1024" },
+            { "value": 2048, "label": "2048" },
+            { "value": 4096, "label": "4096" }
+          ],
+          "default": 1024,
+          "tooltip": "Resolution of the baked texture atlas used by official TRELLIS postprocessing."
+        },
+        {
+          "id": "simplify",
+          "label": "Simplify Ratio",
+          "type": "float",
+          "default": 0.95,
+          "min": 0.0,
+          "max": 1.0,
+          "tooltip": "Triangle simplification ratio used during GLB postprocessing."
         },
         {
           "id": "seed",
@@ -119,11 +254,18 @@
   ],
   "models": [
     {
-      "id": "trellis-2",
+      "id": "base-4b",
       "name": "TRELLIS.2-4B",
       "hf_repo": "microsoft/TRELLIS.2-4B",
       "download_check": "pipeline.json",
       "description": "4B-parameter O-Voxel diffusion model for high-fidelity image-to-3D with PBR textures (~24GB VRAM)"
+    },
+    {
+      "id": "text-xlarge",
+      "name": "TRELLIS Text XL",
+      "hf_repo": "microsoft/TRELLIS-text-xlarge",
+      "download_check": "pipeline.json",
+      "description": "Official native TRELLIS text-to-mesh model weights."
     }
   ],
   "signature": "BYa3IuqxLgLlMG/mw7x/Un2kLa05qt3e2DrXSoemCMkpB00pMPrIZEp1/A+bMeh1WCkLhUYtWoq2eZufwGK4DQ=="

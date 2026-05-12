@@ -11,3 +11,6 @@ opencv_python-*.dist-info/
 # Compiled pycache — platform-specific, not portable
 __pycache__/
 *.pyc
+
+# Native packages must come from the extension venv, not vendor/
+nvdiffrast/
