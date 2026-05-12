@@ -383,7 +383,11 @@ def run(cmd: list[str], *, env: dict[str, str] | None = None, cwd: Path | None =
 
 
 def pip(venv: Path, *args: str, env: dict[str, str] | None = None) -> None:
-    run([str(venv_bin(venv, "pip")), *args], env=env)
+    # Always invoke pip through the venv Python executable. On Windows, running
+    # `venv\\Scripts\\pip.exe install --upgrade pip ...` can fail because pip is
+    # trying to replace the wrapper currently executing. `python -m pip` is the
+    # supported cross-platform form and also works on Linux.
+    run([str(venv_bin(venv, "python")), "-m", "pip", *args], env=env)
 
 
 def pip_install(

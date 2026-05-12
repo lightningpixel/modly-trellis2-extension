@@ -426,6 +426,24 @@ def test_python_runtime_dependency_contract() -> None:
     )
 
 
+def test_pip_invocation_uses_venv_python_module() -> None:
+    setup = load_module("modly_setup_validation_python_m_pip", "setup.py")
+    captured = []
+
+    def capture_run(cmd, *, env=None, cwd=None):
+        captured.append((cmd, env, cwd))
+
+    with patched_attr(setup, "is_windows", lambda: True), patched_attr(setup, "run", capture_run):
+        setup.pip(Path("C:/Users/example/Modly/extensions/trellis-2/venv"), "install", "--upgrade", "pip")
+
+    assert_true(len(captured) == 1, "pip helper should delegate to one run() call")
+    cmd, env, cwd = captured[0]
+    assert_true(env is None and cwd is None, "pip helper should preserve optional env/cwd defaults")
+    assert_true(cmd[0].endswith("Scripts/python.exe"), "Windows pip helper must use the venv python executable")
+    assert_true(cmd[1:3] == ["-m", "pip"], "pip helper must invoke pip as python -m pip")
+    assert_true("pip.exe" not in cmd[0], "pip helper must not execute pip.exe directly because Windows self-upgrade can fail")
+
+
 def test_native_build_env_steering_for_arm64_source_builds() -> None:
     setup = load_module("modly_setup_validation_native_env", "setup.py")
     toolkit_root = Path("/usr/local/cuda-12.8")
@@ -1206,6 +1224,7 @@ def main() -> None:
     test_setup_plan_and_attention()
     test_optional_and_core_native_install_contracts()
     test_python_runtime_dependency_contract()
+    test_pip_invocation_uses_venv_python_module()
     test_native_build_env_steering_for_arm64_source_builds()
     test_arm64_spconv_source_build_env()
     test_patch_installed_cumm_cuda_discovery()
