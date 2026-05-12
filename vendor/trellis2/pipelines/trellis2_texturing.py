@@ -1,3 +1,6 @@
+import json
+import os
+from pathlib import Path
 from typing import *
 import torch
 import torch.nn as nn
@@ -13,6 +16,53 @@ import cumesh
 import nvdiffrast.torch as dr
 import cv2
 import flex_gemm
+
+
+_TEXTURE_DEBUG_DIR_ENV = 'MODLY_TRELLIS2_TEXTURE_DEBUG_DIR'
+_TEXTURE_DEBUG_LABEL_ENV = 'MODLY_TRELLIS2_TEXTURE_DEBUG_LABEL'
+
+
+def _texture_debug_dir() -> Optional[Path]:
+    raw = os.environ.get(_TEXTURE_DEBUG_DIR_ENV, '').strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _texture_debug_label() -> str:
+    return os.environ.get(_TEXTURE_DEBUG_LABEL_ENV, '').strip() or 'texture-debug'
+
+
+def _texture_image_stats(image: np.ndarray) -> dict[str, Any]:
+    channels = image.shape[-1] if image.ndim == 3 else 1
+    flat = image.reshape(-1, channels) if image.ndim == 3 else image.reshape(-1, 1)
+    return {
+        'shape': list(image.shape),
+        'min': [int(value) for value in flat.min(axis=0)],
+        'max': [int(value) for value in flat.max(axis=0)],
+        'mean': [round(float(value), 4) for value in flat.mean(axis=0)],
+    }
+
+
+def _write_texture_debug_image(stage: str, image: np.ndarray, extra: Optional[dict[str, Any]] = None) -> None:
+    debug_dir = _texture_debug_dir()
+    if debug_dir is None:
+        return
+
+    label = _texture_debug_label()
+    image_path = debug_dir / f'{label}-{stage}.png'
+    stats_path = debug_dir / f'{label}-{stage}.json'
+    Image.fromarray(image).save(image_path)
+    payload = {
+        'stage': stage,
+        'image_path': str(image_path),
+        'stats': _texture_image_stats(image),
+    }
+    if extra:
+        payload['extra'] = extra
+    stats_path.write_text(json.dumps(payload, indent=2), encoding='utf-8')
 
 
 class Trellis2TexturingPipeline(Pipeline):
@@ -337,6 +387,11 @@ class Trellis2TexturingPipeline(Pipeline):
         metallic = np.clip(attrs[..., self.pbr_attr_layout['metallic']].cpu().numpy() * 255, 0, 255).astype(np.uint8)
         roughness = np.clip(attrs[..., self.pbr_attr_layout['roughness']].cpu().numpy() * 255, 0, 255).astype(np.uint8)
         alpha = np.clip(attrs[..., self.pbr_attr_layout['alpha']].cpu().numpy() * 255, 0, 255).astype(np.uint8)
+        _write_texture_debug_image(
+            'base-color-pre-inpaint',
+            base_color,
+            extra={'valid_texel_ratio': float(np.count_nonzero(mask) / mask.size)},
+        )
         
         # extend
         mask = (~mask).astype(np.uint8)
@@ -344,9 +399,17 @@ class Trellis2TexturingPipeline(Pipeline):
         metallic = cv2.inpaint(metallic, mask, 1, cv2.INPAINT_TELEA)[..., None]
         roughness = cv2.inpaint(roughness, mask, 1, cv2.INPAINT_TELEA)[..., None]
         alpha = cv2.inpaint(alpha, mask, 1, cv2.INPAINT_TELEA)[..., None]
+        _write_texture_debug_image(
+            'base-color-post-inpaint',
+            base_color,
+            extra={'inpaint_mask_coverage': float(np.count_nonzero(mask) / mask.size)},
+        )
+        _write_texture_debug_image('alpha-post-inpaint', alpha[..., 0])
+        final_base_color = np.concatenate([base_color, alpha], axis=-1)
+        _write_texture_debug_image('atlas-base-color-final', final_base_color)
         
         material = trimesh.visual.material.PBRMaterial(
-            baseColorTexture=Image.fromarray(np.concatenate([base_color, alpha], axis=-1)),
+            baseColorTexture=Image.fromarray(final_base_color),
             baseColorFactor=np.array([255, 255, 255, 255], dtype=np.uint8),
             metallicRoughnessTexture=Image.fromarray(np.concatenate([np.zeros_like(metallic), roughness, metallic], axis=-1)),
             metallicFactor=1.0,
